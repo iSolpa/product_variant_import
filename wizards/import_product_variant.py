@@ -486,10 +486,13 @@ class ImportVariant(models.TransientModel):
             product.invalidate_recordset()
             product._create_variant_ids()
             product.flush_recordset()
+            self.env.cr.commit()  # Ensure all changes are committed
             
             # Update variant-specific values
             if variant_specific_values_list:
                 _logger.info(f"Updating variant-specific values for {len(variant_specific_values_list)} combinations")
+                
+                # Get all existing variants
                 variants = self.env['product.product'].search([('product_tmpl_id', '=', product.id)])
                 variant_map = {}
                 for variant in variants:
@@ -515,6 +518,37 @@ class ImportVariant(models.TransientModel):
                     value_combination = variant_data['value_combination']
                     specific_values = variant_data['specific_values']
                     variant = variant_map.get(value_combination)
+                    
+                    if not variant:
+                        # If variant doesn't exist, create it
+                        try:
+                            _logger.info(f"Creating missing variant with combination {value_combination}")
+                            # Prepare attribute value IDs for the combination
+                            attr_value_ids = []
+                            for value_name in value_combination:
+                                for attr_line in product.attribute_line_ids:
+                                    attr_value = self.env['product.attribute.value'].search([
+                                        ('name', '=', value_name),
+                                        ('attribute_id', '=', attr_line.attribute_id.id)
+                                    ], limit=1)
+                                    if attr_value:
+                                        attr_value_ids.append((4, attr_value.id))
+                            
+                            # Create the variant
+                            variant_vals = {
+                                'product_tmpl_id': product.id,
+                                'attribute_value_ids': attr_value_ids
+                            }
+                            if specific_values.get('default_code'):
+                                variant_vals['default_code'] = specific_values['default_code']
+                            
+                            variant = self.env['product.product'].create(variant_vals)
+                            _logger.info(f"Successfully created variant {variant.display_name}")
+                            
+                        except Exception as e:
+                            _logger.error(f"Failed to create variant with combination {value_combination}: {str(e)}", exc_info=True)
+                            continue
+                    
                     if variant:
                         # Ensure barcode conflict check happens before any variant updates
                         if 'barcode' in specific_values:
@@ -523,35 +557,39 @@ class ImportVariant(models.TransientModel):
                                 _logger.warning(
                                     f"Barcode {specific_values['barcode']} already assigned to {conflicting_product.display_name}")
                                 continue  # Skip this variant if barcode conflict exists
+                        
                         # Proceed with variant update only after conflict check
-                        if specific_values:  # Only update if there are remaining values
-                            variant.write(specific_values)
-                            # Handle quantity updates through stock.quant
-                            if 'qty_available' in specific_values:
-                                qty = float(specific_values.get('qty_available', 0.0))
-                                current_qty = variant.with_context(location=location.id).qty_available if location else 0.0
+                        if specific_values:  # Only update if there are values to update
+                            try:
+                                variant.write(specific_values)
+                                _logger.info(f"Updated variant {variant.display_name} with values {specific_values}")
                                 
-                                if location:
-                                    if float_compare(qty, current_qty, precision_digits=2) != 0:
-                                        _logger.info(f"Creating stock quant for variant {variant.display_name}")
-                                        try:
-                                            # Create stock quant
-                                            quant = self.env['stock.quant'].create({
-                                                'product_id': variant.id,
-                                                'location_id': location.id,
-                                                'inventory_quantity': qty,
-                                            })
-                                            _logger.info(f"Created stock quant for {variant.display_name} (ID: {quant.id})")
-                                            
-                                            # Apply inventory
-                                            quant.action_apply_inventory()
-                                            _logger.info(f"Applied inventory for {variant.display_name}")
-                                        except Exception as e:
-                                            _logger.error(f"Error during stock quant adjustment for variant {variant.display_name}: {str(e)}", exc_info=True)
-                            else:
-                                _logger.info(f"Skipping quantity update for variant {variant.display_name} (no quantity specified in import)")
-                    else:
-                        _logger.warning(f"Variant with combination {value_combination} not found for product {group_key}")
+                                # Handle quantity updates through stock.quant
+                                if 'qty_available' in specific_values:
+                                    qty = float(specific_values.get('qty_available', 0.0))
+                                    current_qty = variant.with_context(location=location.id).qty_available if location else 0.0
+                                    
+                                    if location:
+                                        if float_compare(qty, current_qty, precision_digits=2) != 0:
+                                            _logger.info(f"Creating stock quant for variant {variant.display_name}")
+                                            try:
+                                                # Create stock quant
+                                                quant = self.env['stock.quant'].create({
+                                                    'product_id': variant.id,
+                                                    'location_id': location.id,
+                                                    'inventory_quantity': qty,
+                                                })
+                                                _logger.info(f"Created stock quant for {variant.display_name} (ID: {quant.id})")
+                                                
+                                                # Apply inventory
+                                                quant.action_apply_inventory()
+                                                _logger.info(f"Applied inventory for {variant.display_name}")
+                                            except Exception as e:
+                                                _logger.error(f"Error during stock quant adjustment for variant {variant.display_name}: {str(e)}", exc_info=True)
+                                else:
+                                    _logger.info(f"Skipping quantity update for variant {variant.display_name} (no quantity specified in import)")
+                            except Exception as e:
+                                _logger.error(f"Failed to update variant {variant.display_name}: {str(e)}", exc_info=True)
         else:
             _logger.info(f"No variant attributes provided for product '{group_key}'")
 
