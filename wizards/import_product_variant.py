@@ -552,8 +552,11 @@ class ImportVariant(models.TransientModel):
                 attr_order = {attr_line.attribute_id.name: idx for idx, attr_line in enumerate(product.attribute_line_ids)}
                 
                 for variant in variants:
-                    # Get all attribute values and sort them by the attribute order
+                    # Get all attribute values in the correct order
                     variant_values = []
+                    # Track if we have all required attributes
+                    has_all_attributes = True
+                    
                     for attr_line in product.attribute_line_ids:
                         ptav = variant.product_template_attribute_value_ids.filtered(
                             lambda x: x.attribute_line_id == attr_line
@@ -563,14 +566,21 @@ class ImportVariant(models.TransientModel):
                                 attr_order[ptav.attribute_id.name],
                                 ptav.product_attribute_value_id.name
                             ))
+                        else:
+                            # If any attribute is missing, don't map this variant
+                            has_all_attributes = False
+                            _logger.warning(f"Variant {variant.display_name} is missing attribute {attr_line.attribute_id.name}")
+                            break
                     
-                    # Sort by attribute order and extract just the values
-                    variant_values.sort(key=lambda x: x[0])
-                    full_combination = tuple(v[1] for v in variant_values)
-                    
-                    if full_combination:
+                    # Only map variants that have all required attributes
+                    if has_all_attributes and len(variant_values) == len(product.attribute_line_ids):
+                        # Sort by attribute order and extract just the values
+                        variant_values.sort(key=lambda x: x[0])
+                        full_combination = tuple(v[1] for v in variant_values)
                         variant_map[full_combination] = variant
                         _logger.info(f"Mapped variant combination {full_combination} to variant {variant.display_name} (ID: {variant.id})")
+                    else:
+                        _logger.warning(f"Skipping variant {variant.display_name} - missing some attributes")
 
                 # Get the default location for inventory adjustments
                 location = self.env['stock.location'].search([
@@ -625,7 +635,7 @@ class ImportVariant(models.TransientModel):
                                 # Check if a variant with these template attribute values already exists
                                 existing_variant = self.env['product.product'].search([
                                     ('product_tmpl_id', '=', product.id),
-                                    ('product_template_attribute_value_ids', 'in', template_attribute_values)
+                                    ('product_template_attribute_value_ids', '=', template_attribute_values)
                                 ], limit=1)
                                 
                                 if existing_variant:
