@@ -491,6 +491,9 @@ class ImportVariant(models.TransientModel):
                     _logger.info(f"Removing existing attribute lines for product {group_key}")
                     existing_attr_lines.unlink()
             
+            # Temporarily disable automatic variant creation
+            product.write({'create_variant': 'no_variant'})
+            
             # Create attribute lines for each attribute with all its values
             attribute_lines = []
             for attr_name, attr_values in attribute_value_mapping.items():
@@ -530,7 +533,8 @@ class ImportVariant(models.TransientModel):
                     attribute_lines.append(attr_line)
                     _logger.info(f"Created attribute line for '{attr_name}' with {len(value_ids)} values")
             
-            # Wait for variants to be created
+            # Re-enable variant creation and create variants
+            product.write({'create_variant': 'always'})
             product.invalidate_recordset()
             product._create_variant_ids()
             product.flush_recordset()
@@ -655,7 +659,8 @@ class ImportVariant(models.TransientModel):
                             if len(template_attribute_values) == len(value_combination):
                                 variant_vals = {
                                     'product_tmpl_id': product.id,
-                                    'product_template_attribute_value_ids': [(6, 0, template_attribute_values)]
+                                    'product_template_attribute_value_ids': [(6, 0, template_attribute_values)],
+                                    'name': f"{product.name} ({', '.join(value_combination)})"
                                 }
                                 variant_vals.update(specific_values)
                                 
