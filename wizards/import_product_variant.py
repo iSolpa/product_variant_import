@@ -380,10 +380,17 @@ class ImportVariant(models.TransientModel):
             product = self.env['product.template'].search(search_domain, limit=1)
             
             if not product:
-                raise UserError(_("Product not found with:\nBarcode: %s\nInternal Reference: %s\nUnique Identifier: %s") % 
-                              (template_values.get('Barcode', 'N/A'), 
-                               template_values.get('Internal Reference', 'N/A'),
-                               template_values.get('Unique Identifier', 'N/A')))
+                _logger.warning(_(
+                    "Skipping update - Product not found with:\n"
+                    "Barcode: %s\n"
+                    "Internal Reference: %s\n"
+                    "Unique Identifier: %s"
+                ) % (
+                    template_values.get('Barcode', 'N/A'),
+                    template_values.get('Internal Reference', 'N/A'),
+                    template_values.get('Unique Identifier', 'N/A')
+                ))
+                return
             
             _logger.info(f"Found existing product template: {group_key} (ID: {product.id})")
             
@@ -401,6 +408,26 @@ class ImportVariant(models.TransientModel):
             # Update template with remaining values
             product.write(vals)
         else:
+            # Check if product already exists
+            existing_product = False
+            if template_values.get('Barcode'):
+                existing_product = self.env['product.template'].search([
+                    '|',
+                    ('barcode', '=', template_values['Barcode']),
+                    ('product_variant_ids.barcode', '=', template_values['Barcode'])
+                ], limit=1)
+            
+            if existing_product:
+                _logger.warning(_(
+                    "Skipping creation - Barcode '%s' already assigned to product: [%s] %s"
+                ) % (
+                    template_values.get('Barcode'),
+                    existing_product.default_code or existing_product.barcode or 'N/A',
+                    existing_product.display_name
+                ))
+                return
+            
+            # If no existing product found, create new one
             product = self.env['product.template'].create(vals)
             _logger.info(f"Created new product template: {group_key} (ID: {product.id})")
 
