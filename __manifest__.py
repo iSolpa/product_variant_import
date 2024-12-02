@@ -38,7 +38,7 @@
     'company': 'Independent Solutions',
     'maintainer': 'Independent Solutions',
     'website': 'https://isolpa.com',
-    'depends': ['sale_management', 'stock'],
+    'depends': ['sale_management', 'stock', 'point_of_sale'],
     'data': [
         'security/ir.model.access.csv',
         'security/product_variant_import_groups.xml',

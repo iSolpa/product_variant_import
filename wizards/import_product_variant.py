@@ -292,7 +292,24 @@ class ImportVariant(models.TransientModel):
             'standard_price': float(template_values.get('Cost', '0.0') or '0.0'),
             'weight': float(template_values.get('Weight', '0.0') or '0.0'),
             'volume': float(template_values.get('Volume', '0.0') or '0.0'),
+            'available_in_pos': template_values.get('Available in POS', 'True').lower() == 'true',
         }
+
+        # Process image if provided
+        if template_values.get('Image'):
+            image_path = template_values.get('Image')
+            image_data = po.process_image(image_path)
+            if image_data:
+                vals['image_1920'] = image_data
+
+        # Process POS Category if provided
+        if template_values.get('POS Category'):
+            pos_categ = self.env['pos.category'].search([('name', '=', template_values['POS Category'])], limit=1)
+            if not pos_categ:
+                pos_categ = self.env['pos.category'].create({
+                    'name': template_values['POS Category']
+                })
+            vals['pos_categ_id'] = pos_categ.id
 
         # Process category
         category = template_values.get('Category', '').strip()
@@ -529,7 +546,7 @@ class ImportVariant(models.TransientModel):
                     ('usage', '=', 'internal'),
                     ('company_id', '=', self.env.company.id)
                 ], limit=1)
-                
+
                 if not location:
                     _logger.error("No internal location found for the current company. Inventory adjustment cannot be created.")
                     return  # Exit the function if no location is found
