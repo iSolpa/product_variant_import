@@ -309,7 +309,7 @@ class ImportVariant(models.TransientModel):
                 pos_categ = self.env['pos.category'].create({
                     'name': template_values['POS Category']
                 })
-            vals['pos_categ_id'] = pos_categ.id
+            vals['pos_categ_ids'] = [(6, 0, [pos_categ.id])]
 
         # Process category
         category = template_values.get('Category', '').strip()
