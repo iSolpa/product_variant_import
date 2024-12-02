@@ -545,28 +545,11 @@ class ImportVariant(models.TransientModel):
                 
                 variant_map = {}
                 for variant in variants:
-                    # Create both full and partial combinations for flexible matching
-                    value_combinations = []
+                    # Only use the full combination of attributes for exact matching
                     sorted_values = variant.product_template_attribute_value_ids.sorted('attribute_id')
-                    
-                    # Add the full combination
                     full_combination = tuple(value.name for value in sorted_values)
-                    value_combinations.append(full_combination)
-                    
-                    # Add partial combinations based on attribute names
-                    attr_values = [(value.attribute_id.name, value.name) for value in sorted_values]
-                    for i in range(len(attr_values)):
-                        partial_values = []
-                        for attr_name, value_name in attr_values:
-                            if attr_name in ['Talla', 'Colores']:  # Always include size and color
-                                partial_values.append(value_name)
-                        if partial_values:
-                            value_combinations.append(tuple(partial_values))
-                    
-                    # Map all combinations to this variant
-                    for combination in value_combinations:
-                        variant_map[combination] = variant
-                        _logger.info(f"Mapped variant combination {combination} to variant {variant.display_name}")
+                    variant_map[full_combination] = variant
+                    _logger.info(f"Mapped variant combination {full_combination} to variant {variant.display_name}")
 
                 # Get the default location for inventory adjustments
                 location = self.env['stock.location'].search([
@@ -588,23 +571,33 @@ class ImportVariant(models.TransientModel):
                         # If variant doesn't exist, create it
                         try:
                             _logger.info(f"Creating missing variant with combination {value_combination}")
-                            
-                            # Create the variant through product template
                             template_attribute_values = []
-                            for value_name in value_combination:
-                                for attr_line in product.attribute_line_ids:
+                            
+                            # Get all attributes and their values from the combination
+                            for idx, value_name in enumerate(value_combination):
+                                # Find the attribute line for this index
+                                if idx < len(product.attribute_line_ids):
+                                    attr_line = product.attribute_line_ids[idx]
+                                    # Find the attribute value
                                     attr_value = self.env['product.attribute.value'].search([
                                         ('name', '=', value_name),
                                         ('attribute_id', '=', attr_line.attribute_id.id)
                                     ], limit=1)
+                                    
                                     if attr_value:
                                         # Find the product template attribute value
                                         ptav = self.env['product.template.attribute.value'].search([
                                             ('product_attribute_value_id', '=', attr_value.id),
-                                            ('attribute_line_id', 'in', product.attribute_line_ids.ids)
+                                            ('attribute_line_id', '=', attr_line.id)
                                         ], limit=1)
                                         if ptav:
                                             template_attribute_values.append(ptav.id)
+                                        else:
+                                            _logger.error(f"Could not find template attribute value for {value_name} in line {attr_line.display_name}")
+                                    else:
+                                        _logger.error(f"Could not find attribute value {value_name} for attribute {attr_line.attribute_id.name}")
+                                else:
+                                    _logger.error(f"No attribute line found for index {idx} (value: {value_name})")
                             
                             if len(template_attribute_values) == len(value_combination):
                                 # Check if a variant with these template attribute values already exists
