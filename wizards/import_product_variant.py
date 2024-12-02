@@ -545,11 +545,21 @@ class ImportVariant(models.TransientModel):
                 
                 variant_map = {}
                 for variant in variants:
-                    # Only use the full combination of attributes for exact matching
-                    sorted_values = variant.product_template_attribute_value_ids.sorted('attribute_id')
-                    full_combination = tuple(value.name for value in sorted_values)
-                    variant_map[full_combination] = variant
-                    _logger.info(f"Mapped variant combination {full_combination} to variant {variant.display_name}")
+                    # Get all attribute values in the correct order based on attribute lines
+                    variant_values = []
+                    for attr_line in product.attribute_line_ids:
+                        # Find the value for this attribute line in the variant
+                        ptav = variant.product_template_attribute_value_ids.filtered(
+                            lambda x: x.attribute_line_id == attr_line
+                        )
+                        if ptav:
+                            variant_values.append(ptav.product_attribute_value_id.name)
+                    
+                    # Create the combination tuple with all attributes
+                    if variant_values:
+                        full_combination = tuple(variant_values)
+                        variant_map[full_combination] = variant
+                        _logger.info(f"Mapped variant combination {full_combination} to variant {variant.display_name} (ID: {variant.id})")
 
                 # Get the default location for inventory adjustments
                 location = self.env['stock.location'].search([
