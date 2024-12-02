@@ -504,17 +504,26 @@ class ImportVariant(models.TransientModel):
                 # Find or create all values for this attribute
                 value_ids = []
                 for attr_value in attr_values:
+                    # Clean the attribute value
+                    attr_value = str(attr_value).strip()
+                    
+                    # Search for existing attribute value
                     attr_value_obj = self.env['product.attribute.value'].search([
-                        ('name', '=', attr_value),
-                        ('attribute_id', '=', attribute.id)
+                        ('attribute_id', '=', attribute.id),
+                        ('name', '=', attr_value)
                     ], limit=1)
+                    
                     if not attr_value_obj:
+                        # Create new attribute value
                         attr_value_obj = self.env['product.attribute.value'].create({
                             'name': attr_value,
                             'attribute_id': attribute.id
                         })
+                        _logger.info(f"Created new attribute value: {attr_value} for attribute {attribute.name}")
+                    else:
+                        _logger.info(f"Found existing attribute value: {attr_value_obj.name} for attribute {attribute.name}")
+                    
                     value_ids.append(attr_value_obj.id)
-                    _logger.info(f"Added value '{attr_value}' (ID: {attr_value_obj.id})")
                 
                 # Create attribute line with all values
                 if value_ids:
@@ -550,24 +559,23 @@ class ImportVariant(models.TransientModel):
                     sorted_values = variant.product_template_attribute_value_ids.sorted('attribute_id')
                     
                     # Add the full combination
-                    full_combination = tuple(value.name for value in sorted_values)
+                    full_combination = tuple(str(value.name).strip() for value in sorted_values)
                     value_combinations.append(full_combination)
                     
                     # Add partial combinations based on attribute names
-                    attr_values = [(value.attribute_id.name, value.name) for value in sorted_values]
-                    for i in range(len(attr_values)):
-                        partial_values = []
-                        for attr_name, value_name in attr_values:
-                            if attr_name in ['Talla', 'Colores']:  # Always include size and color
-                                partial_values.append(value_name)
-                        if partial_values:
-                            value_combinations.append(tuple(partial_values))
+                    attr_values = [(value.attribute_id.name, str(value.name).strip()) for value in sorted_values]
+                    partial_values = []
+                    for attr_name, value_name in attr_values:
+                        if attr_name in ['Talla', 'Colores']:  # Always include size and color
+                            partial_values.append(value_name)
+                    if partial_values:
+                        value_combinations.append(tuple(partial_values))
                     
                     # Map all combinations to this variant
                     for combination in value_combinations:
                         variant_map[combination] = variant
                         _logger.info(f"Mapped variant combination {combination} to variant {variant.display_name}")
-
+                
                 # Get the default location for inventory adjustments
                 location = self.env['stock.location'].search([
                     ('usage', '=', 'internal'),
