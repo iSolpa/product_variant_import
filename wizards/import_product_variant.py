@@ -504,26 +504,17 @@ class ImportVariant(models.TransientModel):
                 # Find or create all values for this attribute
                 value_ids = []
                 for attr_value in attr_values:
-                    # Clean the attribute value
-                    attr_value = str(attr_value).strip()
-                    
-                    # Search for existing attribute value
                     attr_value_obj = self.env['product.attribute.value'].search([
-                        ('attribute_id', '=', attribute.id),
-                        ('name', '=', attr_value)
+                        ('name', '=', attr_value),
+                        ('attribute_id', '=', attribute.id)
                     ], limit=1)
-                    
                     if not attr_value_obj:
-                        # Create new attribute value
                         attr_value_obj = self.env['product.attribute.value'].create({
                             'name': attr_value,
                             'attribute_id': attribute.id
                         })
-                        _logger.info(f"Created new attribute value: {attr_value} for attribute {attribute.name}")
-                    else:
-                        _logger.info(f"Found existing attribute value: {attr_value_obj.name} for attribute {attribute.name}")
-                    
                     value_ids.append(attr_value_obj.id)
+                    _logger.info(f"Added value '{attr_value}' (ID: {attr_value_obj.id})")
                 
                 # Create attribute line with all values
                 if value_ids:
@@ -544,113 +535,147 @@ class ImportVariant(models.TransientModel):
             # Force a reload of the product to ensure we have all variants
             product = self.env['product.template'].browse(product.id)
             
-            # Create a map of existing variants for faster lookup
-            variant_map = {}
-            for variant in product.product_variant_ids:
-                # Get all attribute values for this variant
-                variant_values = []
-                for ptav in variant.product_template_attribute_value_ids:
-                    variant_values.append(ptav.product_attribute_value_id.name)
+            # Update variant-specific values
+            if variant_specific_values_list:
+                _logger.info(f"Updating variant-specific values for {len(variant_specific_values_list)} combinations")
                 
-                # Sort to ensure consistent ordering
-                variant_values.sort()
-                variant_map[tuple(variant_values)] = variant
+                # Get all existing variants and their combinations
+                variants = self.env['product.product'].search([('product_tmpl_id', '=', product.id)])
+                _logger.info(f"Found {len(variants)} variants for product {product.name}")
                 
-            _logger.info(f"Found {len(product.product_variant_ids)} variants for product {product.name}")
-            
-            # Process each variant combination
-            for value_combination in variant_specific_values_list:
-                # Handle both string and tuple value combinations
-                if isinstance(value_combination['value_combination'], tuple):
-                    value_list = list(value_combination['value_combination'])
-                else:
-                    value_list = value_combination['value_combination'].split(';')
+                variant_map = {}
+                for variant in variants:
+                    # Create both full and partial combinations for flexible matching
+                    value_combinations = []
+                    sorted_values = variant.product_template_attribute_value_ids.sorted('attribute_id')
+                    
+                    # Add the full combination
+                    full_combination = tuple(value.name for value in sorted_values)
+                    value_combinations.append(full_combination)
+                    
+                    # Add partial combinations based on attribute names
+                    attr_values = [(value.attribute_id.name, value.name) for value in sorted_values]
+                    for i in range(len(attr_values)):
+                        partial_values = []
+                        for attr_name, value_name in attr_values:
+                            if attr_name in ['Talla', 'Colores']:  # Always include size and color
+                                partial_values.append(value_name)
+                        if partial_values:
+                            value_combinations.append(tuple(partial_values))
+                    
+                    # Map all combinations to this variant
+                    for combination in value_combinations:
+                        variant_map[combination] = variant
+                        _logger.info(f"Mapped variant combination {combination} to variant {variant.display_name}")
+
+                # Get the default location for inventory adjustments
+                location = self.env['stock.location'].search([
+                    ('usage', '=', 'internal'),
+                    ('company_id', '=', self.env.company.id)
+                ], limit=1)
                 
-                # Clean and validate values
-                value_list = [str(v).strip() for v in value_list if v and str(v).strip()]
-                if not value_list:
-                    _logger.warning(f"Empty value combination found for product {product.name}")
-                    continue
+                if not location:
+                    _logger.error("No internal location found for the current company. Inventory adjustment cannot be created.")
+                    return  # Exit the function if no location is found
                 
-                # Sort values for consistent comparison
-                value_list.sort()
-                value_tuple = tuple(value_list)
-                
-                # Try to find existing variant with exact attribute combination
-                variant = variant_map.get(value_tuple)
-                
-                if not variant:
-                    try:
-                        _logger.info(f"Creating missing variant with combination {value_list}")
-                        
-                        # Find all required attribute values first
-                        attr_value_ids = []
-                        missing_values = []
-                        
-                        for value_name in value_list:
-                            found = False
-                            for attr_line in product.attribute_line_ids:
-                                attr_value = self.env['product.attribute.value'].search([
-                                    ('name', '=', value_name),
-                                    ('attribute_id', '=', attr_line.attribute_id.id)
-                                ], limit=1)
-                                if attr_value:
-                                    attr_value_ids.append(attr_value.id)
-                                    found = True
-                                    break
-                            if not found:
-                                missing_values.append(value_name)
-                        
-                        if missing_values:
-                            _logger.error(f"Missing attribute values for product {product.name}: {missing_values}")
-                            continue
-                        
-                        # Find corresponding template attribute values
-                        template_attribute_values = []
-                        for attr_value_id in attr_value_ids:
-                            ptav = self.env['product.template.attribute.value'].search([
-                                ('product_attribute_value_id', '=', attr_value_id),
-                                ('attribute_line_id', 'in', product.attribute_line_ids.ids)
-                            ], limit=1)
-                            if ptav:
-                                template_attribute_values.append(ptav.id)
-                        
-                        if len(template_attribute_values) == len(value_list):
-                            # Double check no variant exists with these exact attributes
-                            domain = [
-                                ('product_tmpl_id', '=', product.id),
-                                ('product_template_attribute_value_ids', 'in', template_attribute_values)
-                            ]
-                            existing_variant = self.env['product.product'].search(domain, limit=1)
+                # Process variants
+                for variant_data in variant_specific_values_list:
+                    value_combination = variant_data['value_combination']
+                    specific_values = variant_data['specific_values']
+                    variant = variant_map.get(value_combination)
+                    
+                    if not variant:
+                        # If variant doesn't exist, create it
+                        try:
+                            _logger.info(f"Creating missing variant with combination {value_combination}")
                             
-                            if existing_variant:
-                                variant = existing_variant
-                                _logger.info(f"Found existing variant with exact combination: {value_list}")
+                            # Create the variant through product template
+                            template_attribute_values = []
+                            for value_name in value_combination:
+                                for attr_line in product.attribute_line_ids:
+                                    attr_value = self.env['product.attribute.value'].search([
+                                        ('name', '=', value_name),
+                                        ('attribute_id', '=', attr_line.attribute_id.id)
+                                    ], limit=1)
+                                    if attr_value:
+                                        # Find the product template attribute value
+                                        ptav = self.env['product.template.attribute.value'].search([
+                                            ('product_attribute_value_id', '=', attr_value.id),
+                                            ('attribute_line_id', 'in', product.attribute_line_ids.ids)
+                                        ], limit=1)
+                                        if ptav:
+                                            template_attribute_values.append(ptav.id)
+                            
+                            if len(template_attribute_values) == len(value_combination):
+                                # Check if a variant with these template attribute values already exists
+                                existing_variant = self.env['product.product'].search([
+                                    ('product_tmpl_id', '=', product.id),
+                                    ('product_template_attribute_value_ids', 'in', template_attribute_values)
+                                ], limit=1)
+                                
+                                if existing_variant:
+                                    _logger.info(f"Found existing variant with same combination. Updating instead of creating.")
+                                    variant = existing_variant
+                                else:
+                                    # Create the variant with the template attribute values
+                                    variant_vals = {
+                                        'product_tmpl_id': product.id,
+                                        'product_template_attribute_value_ids': [(6, 0, template_attribute_values)]
+                                    }
+                                    if specific_values.get('default_code'):
+                                        variant_vals['default_code'] = specific_values['default_code']
+                                    if specific_values.get('barcode'):
+                                        variant_vals['barcode'] = specific_values['barcode']
+                                    
+                                    variant = self.env['product.product'].create(variant_vals)
+                                    _logger.info(f"Successfully created variant {variant.display_name}")
                             else:
-                                # Create new variant with all attributes
-                                variant_vals = {
-                                    'product_tmpl_id': product.id,
-                                    'product_template_attribute_value_ids': [(6, 0, template_attribute_values)]
-                                }
+                                _logger.error(f"Could not find all template attribute values for combination {value_combination}")
+                        except Exception as e:
+                            _logger.error(f"Failed to create variant with combination {value_combination}: {str(e)}", exc_info=True)
+                            continue
+                    
+                    if variant:
+                        # Ensure barcode conflict check happens before any variant updates
+                        if 'barcode' in specific_values:
+                            can_use_barcode, conflicting_product = self._check_barcode_conflicts(specific_values['barcode'], variant)
+                            if not can_use_barcode:
+                                _logger.warning(
+                                    f"Barcode {specific_values['barcode']} already assigned to {conflicting_product.display_name}")
+                                continue  # Skip this variant if barcode conflict exists
+                        
+                        # Proceed with variant update only after conflict check
+                        if specific_values:  # Only update if there are values to update
+                            try:
+                                variant.write(specific_values)
+                                _logger.info(f"Updated variant {variant.display_name} with values {specific_values}")
                                 
-                                # Add optional values
-                                if value_combination['specific_values'].get('default_code'):
-                                    variant_vals['default_code'] = value_combination['specific_values']['default_code']
-                                if value_combination['specific_values'].get('barcode'):
-                                    if not self._check_barcode_conflicts(value_combination['specific_values']['barcode']):
-                                        variant_vals['barcode'] = value_combination['specific_values']['barcode']
-                                
-                                variant = self.env['product.product'].create(variant_vals)
-                                _logger.info(f"Created new variant with all attributes: {value_list}")
-                                
-                                # Update variant map
-                                variant_map[value_tuple] = variant
-                        else:
-                            _logger.error(f"Attribute value mismatch. Expected {len(value_list)} values, found {len(template_attribute_values)}")
-                            _logger.error(f"Values expected: {value_list}")
-                            _logger.error(f"Template attribute values found: {template_attribute_values}")
-                    except Exception as e:
-                        _logger.error(f"Failed to create variant: {str(e)}", exc_info=True)
+                                # Handle quantity updates through stock.quant
+                                if 'qty_available' in specific_values:
+                                    qty = float(specific_values.get('qty_available', 0.0))
+                                    current_qty = variant.with_context(location=location.id).qty_available if location else 0.0
+                                    
+                                    if location:
+                                        if float_compare(qty, current_qty, precision_digits=2) != 0:
+                                            _logger.info(f"Creating stock quant for variant {variant.display_name}")
+                                            try:
+                                                # Create stock quant
+                                                quant = self.env['stock.quant'].create({
+                                                    'product_id': variant.id,
+                                                    'location_id': location.id,
+                                                    'inventory_quantity': qty,
+                                                })
+                                                _logger.info(f"Created stock quant for {variant.display_name} (ID: {quant.id})")
+                                                
+                                                # Apply inventory
+                                                quant.action_apply_inventory()
+                                                _logger.info(f"Applied inventory for {variant.display_name}")
+                                            except Exception as e:
+                                                _logger.error(f"Error during stock quant adjustment for variant {variant.display_name}: {str(e)}", exc_info=True)
+                                else:
+                                    _logger.info(f"Skipping quantity update for variant {variant.display_name} (no quantity specified in import)")
+                            except Exception as e:
+                                _logger.error(f"Failed to update variant {variant.display_name}: {str(e)}", exc_info=True)
         else:
             _logger.info(f"No variant attributes provided for product '{group_key}'")
 
