@@ -314,7 +314,7 @@ class ImportVariant(models.TransientModel):
         # Process category
         category = template_values.get('Category', '').strip()
         if category:
-            category_id = po.process_category(category)
+            category_id = po.process_category(self.env, category)
             if category_id:
                 vals['categ_id'] = category_id
 
