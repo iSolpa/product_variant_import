@@ -491,28 +491,18 @@ class ImportVariant(models.TransientModel):
                     _logger.info(f"Removing existing attribute lines for product {group_key}")
                     existing_attr_lines.unlink()
             
-            # First create/update all attributes with no_variant to prevent premature variant creation
-            attributes_to_update = []
-            for attr_name in attribute_value_mapping.keys():
-                attribute = self.env['product.attribute'].search([('name', '=', attr_name)], limit=1)
-                if attribute:
-                    if attribute.create_variant != 'no_variant':
-                        attributes_to_update.append(attribute.id)
-                        attribute.write({'create_variant': 'no_variant'})
-                else:
-                    attribute = self.env['product.attribute'].create({
-                        'name': attr_name,
-                        'create_variant': 'no_variant'
-                    })
-                    attributes_to_update.append(attribute.id)
-            
-            # Create attribute lines for each attribute with all its values
-            attribute_lines = []
+            # Prepare all attribute lines data first
+            attribute_line_vals = []
             for attr_name, attr_values in attribute_value_mapping.items():
                 _logger.info(f"Processing attribute '{attr_name}' with values: {attr_values}")
                 
-                # Get the attribute (already created above)
+                # Find or create attribute
                 attribute = self.env['product.attribute'].search([('name', '=', attr_name)], limit=1)
+                if not attribute:
+                    attribute = self.env['product.attribute'].create({
+                        'name': attr_name,
+                        'create_variant': 'always'
+                    })
                 _logger.info(f"Using attribute '{attr_name}' (ID: {attribute.id})")
                 
                 # Find or create all values for this attribute
@@ -530,20 +520,20 @@ class ImportVariant(models.TransientModel):
                     value_ids.append(attr_value_obj.id)
                     _logger.info(f"Added value '{attr_value}' (ID: {attr_value_obj.id})")
                 
-                # Create attribute line with all values
+                # Prepare attribute line values
                 if value_ids:
-                    attr_line = self.env['product.template.attribute.line'].create({
+                    attribute_line_vals.append({
                         'product_tmpl_id': product.id,
                         'attribute_id': attribute.id,
                         'value_ids': [(6, 0, value_ids)]
                     })
-                    attribute_lines.append(attr_line)
-                    _logger.info(f"Created attribute line for '{attr_name}' with {len(value_ids)} values")
             
-            # Re-enable variant creation on attributes and create variants
-            if attributes_to_update:
-                self.env['product.attribute'].browse(attributes_to_update).write({'create_variant': 'always'})
+            # Create all attribute lines at once
+            if attribute_line_vals:
+                attribute_lines = self.env['product.template.attribute.line'].create(attribute_line_vals)
+                _logger.info(f"Created {len(attribute_lines)} attribute lines")
             
+            # Create variants
             product.invalidate_recordset()
             product._create_variant_ids()
             product.flush_recordset()
