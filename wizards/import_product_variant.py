@@ -526,11 +526,15 @@ class ImportVariant(models.TransientModel):
                     attribute_lines.append(attr_line)
                     _logger.info(f"Created attribute line for '{attr_name}' with {len(value_ids)} values")
             
-            # Wait for variants to be created
-            product.invalidate_recordset()
+            # Force Odoo to generate the variants
             product._create_variant_ids()
-            product.flush_recordset()
-            self.env.cr.commit()  # Ensure all changes are committed
+
+            # Refresh the product template and variants
+            product.invalidate_cache()
+            product.flush()
+            variants = self.env['product.product'].search([('product_tmpl_id', '=', product.id)])
+            # Commit the transaction to force Odoo to process variant generation
+            self.env.cr.commit()
             
             # Force a reload of the product to ensure we have all variants
             product = self.env['product.template'].browse(product.id)
@@ -543,16 +547,29 @@ class ImportVariant(models.TransientModel):
                 variants = self.env['product.product'].search([('product_tmpl_id', '=', product.id)])
                 _logger.info(f"Found {len(variants)} variants for product {product.name}")
                 
+                # Build a mapping of variants by default_code, barcode, and value_combination
                 variant_map = {}
                 for variant in variants:
-                    # Create the full combination for precise matching
                     sorted_values = variant.product_template_attribute_value_ids.sorted('attribute_id')
+                    if len(sorted_values) != len(attribute_value_mapping):
+                        _logger.info(f"Skipping incomplete variant {variant.display_name}")
+                        continue  # Skip incomplete variants
 
-                    # Add the full combination
-                    full_combination = tuple(value.name for value in sorted_values)
-
-                    # Map only the full combination to this variant
+                    full_combination = tuple(value.name.strip() for value in sorted_values)
                     variant_map[full_combination] = variant
+
+                    # Map by default_code
+                    if variant.default_code:
+                        variant_map[('default_code', variant.default_code)] = variant
+                    # Map by barcode
+                    if variant.barcode:
+                        variant_map[('barcode', variant.barcode)] = variant
+                    # Map by full combination of attribute values
+                    sorted_values = variant.product_template_attribute_value_ids.sorted('attribute_id')
+                    full_combination = tuple(value.name.strip() for value in sorted_values)
+                    variant_map[('combination', full_combination)] = variant
+                    _logger.info(f"Mapped variant with default_code '{variant.default_code}', barcode '{variant.barcode}', combination '{full_combination}' to variant {variant.display_name}")
+
 
 
                 # Get the default location for inventory adjustments
@@ -567,9 +584,26 @@ class ImportVariant(models.TransientModel):
                 
                 # Process variants
                 for variant_data in variant_specific_values_list:
-                    value_combination = variant_data['value_combination']
+                    value_combination = tuple(v.strip() for v in variant_data['value_combination'])
                     specific_values = variant_data['specific_values']
-                    variant = variant_map.get(value_combination)
+                    variant = None
+
+                    # First, try to find the variant by default_code
+                    variant_default_code = specific_values.get('default_code')
+                    if variant_default_code and ('default_code', variant_default_code) in variant_map:
+                        variant = variant_map[('default_code', variant_default_code)]
+                    else:
+                        # Then, try to find by barcode
+                        variant_barcode = specific_values.get('barcode')
+                        if variant_barcode and ('barcode', variant_barcode) in variant_map:
+                            variant = variant_map[('barcode', variant_barcode)]
+                        else:
+                            # Lastly, try to find by attribute combination
+                            if ('combination', value_combination) in variant_map:
+                                variant = variant_map[('combination', value_combination)]
+                            else:
+                                variant = None  # Variant not found
+
                     
                     if not variant:
                         # If variant doesn't exist, create it
