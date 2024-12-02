@@ -596,30 +596,45 @@ class ImportVariant(models.TransientModel):
                         try:
                             _logger.info(f"Creating missing variant with combination {value_combination}")
                             
+                            # Split the attribute values string into individual values
+                            value_list = value_combination.split(';')
+                            _logger.info(f"Processing variant with values: {value_list}")
+                            
+                            if len(value_list) != len(attributes):
+                                _logger.error(f"Mismatch in attribute count. Expected {len(attributes)}, got {len(value_list)}")
+                                continue
+
                             # First, ensure all attributes and values exist
                             template_attribute_values = []
-                            for attr_name, attr_value in zip(attributes, value_combination):
-                                attr_name = attr_name.strip()
-                                attr_value = str(attr_value).strip()
-                                _logger.info(f"Processing attribute {attr_name} with value {attr_value}")
-                                
-                                # Find the attribute line for this attribute
-                                attr_line = product.attribute_line_ids.filtered(
-                                    lambda l: l.attribute_id.name == attr_name
-                                )
-                                
-                                if not attr_line:
-                                    _logger.warning(f"No attribute line found for {attr_name}")
+                            
+                            # Create a map of attribute names to their values for this variant
+                            attr_value_map = dict(zip(attributes, value_list))
+                            _logger.info(f"Attribute-value map: {attr_value_map}")
+                            
+                            # Process each attribute line
+                            for attr_line in product.attribute_line_ids:
+                                attr_name = attr_line.attribute_id.name
+                                if attr_name not in attr_value_map:
+                                    _logger.warning(f"Attribute {attr_name} not found in CSV data")
                                     continue
                                 
-                                # Find the attribute value
+                                attr_value = str(attr_value_map[attr_name]).strip()
+                                _logger.info(f"Processing attribute {attr_name} with value {attr_value}")
+                                
+                                # Find the attribute value in this line
                                 attr_value_obj = attr_line.value_ids.filtered(
                                     lambda v: v.name == attr_value
                                 )
                                 
                                 if not attr_value_obj:
                                     _logger.warning(f"No attribute value found for {attr_value} in {attr_name}")
-                                    continue
+                                    # Try to create the attribute value if it doesn't exist
+                                    attr_value_obj = self.env['product.attribute.value'].create({
+                                        'name': attr_value,
+                                        'attribute_id': attr_line.attribute_id.id
+                                    })
+                                    attr_line.value_ids = [(4, attr_value_obj.id)]
+                                    _logger.info(f"Created new attribute value: {attr_value}")
                                 
                                 # Get the product template attribute value
                                 ptav = self.env['product.template.attribute.value'].search([
@@ -634,7 +649,7 @@ class ImportVariant(models.TransientModel):
                                 else:
                                     _logger.warning(f"No template attribute value found for {attr_value} in {attr_name}")
                             
-                            if len(template_attribute_values) == len(attributes):
+                            if len(template_attribute_values) == len(product.attribute_line_ids):
                                 # All attribute values found, create the variant
                                 variant_vals = specific_values.copy()
                                 variant_vals.update({
@@ -648,7 +663,7 @@ class ImportVariant(models.TransientModel):
                             else:
                                 _logger.warning(
                                     f"Not all attribute values were found. "
-                                    f"Found {len(template_attribute_values)} out of {len(attributes)} required values"
+                                    f"Found {len(template_attribute_values)} out of {len(product.attribute_line_ids)} required values"
                                 )
                         except Exception as e:
                             _logger.error(f"Failed to create variant: {str(e)}", exc_info=True)
