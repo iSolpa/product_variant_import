@@ -445,8 +445,13 @@ class ImportVariant(models.TransientModel):
                         "Number of attributes ({}) does not match number of values ({}) for variant of product '{}'"
                     ).format(len(attributes), len(values_list), group_key))
                 
-                # Store the combination of values for this variant
-                value_combination = tuple(v.strip() for v in values_list)
+                # Create ordered dictionary to maintain attribute order
+                ordered_attributes = []
+                for attr_name, attr_value in zip(attributes, values_list):
+                    ordered_attributes.append((attr_name.strip(), attr_value.strip()))
+                
+                # Store the combination of values for this variant in the correct order
+                value_combination = tuple(v[1] for v in ordered_attributes)
                 specific_values = {
                     'default_code': values.get('Internal Reference', '').strip(),
                 }
@@ -464,13 +469,12 @@ class ImportVariant(models.TransientModel):
                 
                 variant_specific_values_list.append({
                     'value_combination': value_combination,
+                    'attribute_names': [attr[0] for attr in ordered_attributes],
                     'specific_values': specific_values,
                 })
                 
-                # Collect attribute values
-                for attr_name, attr_value in zip(attributes, values_list):
-                    attr_name = attr_name.strip()
-                    attr_value = attr_value.strip()
+                # Collect attribute values maintaining order
+                for attr_name, attr_value in ordered_attributes:
                     if attr_name not in attribute_value_mapping:
                         attribute_value_mapping[attr_name] = set()
                     attribute_value_mapping[attr_name].add(attr_value)
@@ -544,20 +548,27 @@ class ImportVariant(models.TransientModel):
                 _logger.info(f"Found {len(variants)} variants for product {product.name}")
                 
                 variant_map = {}
+                # First, create a mapping of attribute names to their order
+                attr_order = {attr_line.attribute_id.name: idx for idx, attr_line in enumerate(product.attribute_line_ids)}
+                
                 for variant in variants:
-                    # Get all attribute values in the correct order based on attribute lines
+                    # Get all attribute values and sort them by the attribute order
                     variant_values = []
                     for attr_line in product.attribute_line_ids:
-                        # Find the value for this attribute line in the variant
                         ptav = variant.product_template_attribute_value_ids.filtered(
                             lambda x: x.attribute_line_id == attr_line
                         )
                         if ptav:
-                            variant_values.append(ptav.product_attribute_value_id.name)
+                            variant_values.append((
+                                attr_order[ptav.attribute_id.name],
+                                ptav.product_attribute_value_id.name
+                            ))
                     
-                    # Create the combination tuple with all attributes
-                    if variant_values:
-                        full_combination = tuple(variant_values)
+                    # Sort by attribute order and extract just the values
+                    variant_values.sort(key=lambda x: x[0])
+                    full_combination = tuple(v[1] for v in variant_values)
+                    
+                    if full_combination:
                         variant_map[full_combination] = variant
                         _logger.info(f"Mapped variant combination {full_combination} to variant {variant.display_name} (ID: {variant.id})")
 
@@ -574,6 +585,7 @@ class ImportVariant(models.TransientModel):
                 # Process variants
                 for variant_data in variant_specific_values_list:
                     value_combination = variant_data['value_combination']
+                    attribute_names = variant_data['attribute_names']
                     specific_values = variant_data['specific_values']
                     variant = variant_map.get(value_combination)
                     
