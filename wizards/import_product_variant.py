@@ -596,8 +596,12 @@ class ImportVariant(models.TransientModel):
                         try:
                             _logger.info(f"Creating missing variant with combination {value_combination}")
                             
-                            # Split the attribute values string into individual values
-                            value_list = value_combination.split(';')
+                            # Handle both string and tuple value combinations
+                            if isinstance(value_combination, tuple):
+                                value_list = list(value_combination)
+                            else:
+                                value_list = value_combination.split(';')
+                                
                             _logger.info(f"Processing variant with values: {value_list}")
                             
                             if len(value_list) != len(attributes):
