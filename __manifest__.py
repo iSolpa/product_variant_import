@@ -21,7 +21,7 @@
 #############################################################################
 {
     'name': 'Import Product variant',
-    'version': '17.0.1.1.0',
+    'version': '17.0.1.2.0',
     'category': 'Sales',
     'summary': """Enhanced module for importing products and product variants with advanced features.""",
     'description': """This module is used to import products and their attributes using xlsx and csv files.

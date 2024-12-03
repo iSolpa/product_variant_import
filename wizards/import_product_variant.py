@@ -28,6 +28,7 @@ from odoo.exceptions import UserError
 from odoo.tools import float_compare
 from . import file_processors as fp
 from . import product_operations as po
+import itertools
 
 _logger = logging.getLogger(__name__)
 
@@ -569,24 +570,19 @@ class ImportVariant(models.TransientModel):
                 value_combinations.append(full_combination)
                 _logger.info(f"Created full combination: {full_combination}")
                 
-                # Add partial combinations based on attribute names
+                # Add all possible combinations of attributes
                 attr_values = [(value.attribute_id.name, value.name) for value in sorted_values]
-                _logger.info("Creating partial combinations:")
+                _logger.info("Creating attribute combinations:")
                 
-                # Create only one partial combination with size and color
-                partial_values = []
-                for attr_name, value_name in attr_values:
-                    if attr_name in ['Talla', 'Colores']:  # Always include size and color
-                        partial_values.append(value_name)
-                        _logger.info(f"  - Including {attr_name}: {value_name}")
-                    else:
-                        _logger.info(f"  - Skipping {attr_name}: {value_name} (not size/color)")
-                
-                if partial_values and len(partial_values) == 2:  # Only add if we have both size and color
-                    partial_tuple = tuple(partial_values)
-                    if partial_tuple not in value_combinations:  # Avoid duplicates
-                        value_combinations.append(partial_tuple)
-                        _logger.info(f"  → Added partial combination: {partial_tuple}")
+                # Create combinations of all lengths (from 1 to total number of attributes)
+                for length in range(1, len(attr_values) + 1):
+                    for subset in itertools.combinations(attr_values, length):
+                        values = [value[1] for value in subset]  # Extract just the value names
+                        value_tuple = tuple(values)
+                        if value_tuple not in value_combinations:
+                            value_combinations.append(value_tuple)
+                            attr_names = [attr[0] for attr in subset]
+                            _logger.info(f"  → Added combination: {dict(zip(attr_names, values))}")
                 
                 # Map all combinations to this variant
                 for combination in value_combinations:
