@@ -280,6 +280,29 @@ class ImportVariant(models.TransientModel):
         _logger.info(f"Processing product template: {group_key}")
         # Use the first values as the template data
         template_values = product_values_list[0]
+        
+        # Initialize attribute value mapping
+        attribute_value_mapping = {}
+        
+        # Process variants first to collect all attribute values
+        for values in product_values_list:
+            if values.get('Variant Attributes') and values.get('Attribute Values'):
+                attributes = values['Variant Attributes'].split(',')
+                values_list = values['Attribute Values'].split(';')
+                
+                if len(attributes) != len(values_list):
+                    raise UserError(_(
+                        "Number of attributes ({}) does not match number of values ({}) for variant of product '{}'"
+                    ).format(len(attributes), len(values_list), group_key))
+                
+                # Collect attribute values
+                for attr_name, attr_value in zip(attributes, values_list):
+                    attr_name = attr_name.strip()
+                    attr_value = attr_value.strip()
+                    if attr_name not in attribute_value_mapping:
+                        attribute_value_mapping[attr_name] = set()
+                    attribute_value_mapping[attr_name].add(attr_value)
+        
         # Initialize vals dictionary for both create and update methods
         vals = {
             'name': template_values.get('Name', ''),
@@ -360,22 +383,16 @@ class ImportVariant(models.TransientModel):
         # Find or create product template based on method
         if self.method in ['update', 'update_product']:
             product = False
-            search_domain = ['|', '|']  # Start with OR operators for three conditions
+            search_domain = []
             
             if template_values.get('Barcode'):
-                search_domain.append(('barcode', '=', template_values['Barcode']))
+                search_domain = [('barcode', '=', template_values['Barcode'])]
+            elif template_values.get('Internal Reference'):
+                search_domain = [('default_code', '=', template_values['Internal Reference'])]
+            elif template_values.get('Unique Identifier'):
+                search_domain = [('default_code', '=', template_values['Unique Identifier'])]
             else:
-                search_domain.append(('barcode', '=', False))
-                
-            if template_values.get('Internal Reference'):
-                search_domain.append(('default_code', '=', template_values['Internal Reference']))
-            else:
-                search_domain.append(('default_code', '=', False))
-                
-            if template_values.get('Unique Identifier'):
-                search_domain.append(('default_code', '=', template_values['Unique Identifier']))
-            else:
-                search_domain.append(('default_code', '=', False))
+                search_domain = [('name', '=', template_values.get('Name'))]
             
             _logger.info(f"Searching for product with domain: {search_domain}")
             product = self.env['product.template'].search(search_domain, limit=1)
@@ -385,11 +402,13 @@ class ImportVariant(models.TransientModel):
                     "Skipping update - Product not found with:\n"
                     "Barcode: %s\n"
                     "Internal Reference: %s\n"
-                    "Unique Identifier: %s"
+                    "Unique Identifier: %s\n"
+                    "Name: %s"
                 ) % (
                     template_values.get('Barcode', 'N/A'),
                     template_values.get('Internal Reference', 'N/A'),
-                    template_values.get('Unique Identifier', 'N/A')
+                    template_values.get('Unique Identifier', 'N/A'),
+                    template_values.get('Name', 'N/A')
                 ))
                 return
             
@@ -404,7 +423,61 @@ class ImportVariant(models.TransientModel):
                         f"Barcode {barcode} already assigned to {conflicting_product.display_name}. "
                         f"Skipping barcode update for template."
                     )
-                    vals.pop('barcode')
+                    vals.pop('barcode', None)
+            
+            # Don't remove existing attribute lines when updating
+            if attribute_value_mapping:
+                # Update existing attribute lines instead of removing them
+                for attr_name, attr_values in attribute_value_mapping.items():
+                    attr_name = attr_name.strip()
+                    attribute = self.env['product.attribute'].search([
+                        '|',
+                        ('name', '=ilike', attr_name),
+                        ('name', '=', attr_name)
+                    ], limit=1)
+                    
+                    if not attribute:
+                        continue
+                        
+                    # Find existing attribute line
+                    attr_line = self.env['product.template.attribute.line'].search([
+                        ('product_tmpl_id', '=', product.id),
+                        ('attribute_id', '=', attribute.id)
+                    ], limit=1)
+                    
+                    # Get or create attribute values
+                    value_ids = []
+                    for attr_value in attr_values:
+                        attr_value = attr_value.strip()
+                        attr_value_obj = self.env['product.attribute.value'].search([
+                            ('name', '=', attr_value),
+                            ('attribute_id', '=', attribute.id)
+                        ], limit=1)
+                        
+                        if not attr_value_obj:
+                            attr_value_obj = self.env['product.attribute.value'].search([
+                                ('name', '=ilike', attr_value),
+                                ('attribute_id', '=', attribute.id)
+                            ], limit=1)
+                        
+                        if not attr_value_obj:
+                            attr_value_obj = self.env['product.attribute.value'].create({
+                                'name': attr_value,
+                                'attribute_id': attribute.id
+                            })
+                        
+                        value_ids.append(attr_value_obj.id)
+                    
+                    if attr_line:
+                        # Update existing attribute line
+                        attr_line.write({'value_ids': [(6, 0, value_ids)]})
+                    else:
+                        # Create new attribute line if it doesn't exist
+                        self.env['product.template.attribute.line'].create({
+                            'product_tmpl_id': product.id,
+                            'attribute_id': attribute.id,
+                            'value_ids': [(6, 0, value_ids)]
+                        })
             
             # Update template with remaining values
             product.write(vals)
@@ -433,7 +506,6 @@ class ImportVariant(models.TransientModel):
             _logger.info(f"Created new product template: {group_key} (ID: {product.id})")
 
         # Prepare attribute lines and variant data
-        attribute_value_mapping = {}
         variant_specific_values_list = []
         for values in product_values_list:
             # Process variants
