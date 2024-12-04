@@ -452,6 +452,16 @@ class ImportVariant(models.TransientModel):
                     'default_code': values.get('Internal Reference', '').strip(),
                 }
                 
+                # Handle cost price
+                cost = values.get('Cost', '').strip()
+                if cost:
+                    try:
+                        specific_values['standard_price'] = float(cost)
+                        _logger.info(f"Setting cost price to {cost} for variant")
+                    except (ValueError, TypeError) as e:
+                        _logger.warning(f"Invalid cost value '{cost}': {str(e)}")
+                        specific_values['standard_price'] = 0.0
+                
                 # Handle quantity from either column name
                 qty_value = values.get('Qty On hand', values.get('Quantity', ''))
                 # Only process quantity if it's not blank
@@ -628,6 +638,12 @@ class ImportVariant(models.TransientModel):
                     # Proceed with variant update only after conflict check
                     if specific_values:  # Only update if there are values to update
                         try:
+                            # Update cost first if specified
+                            if 'standard_price' in specific_values:
+                                variant.write({'standard_price': specific_values['standard_price']})
+                                _logger.info(f"Updated cost price to {specific_values['standard_price']} for {variant.display_name}")
+                            
+                            # Update other values
                             variant.write(specific_values)
                             _logger.info(f"Updated variant {variant.display_name} with values {specific_values}")
                             
@@ -635,6 +651,10 @@ class ImportVariant(models.TransientModel):
                             if 'qty_available' in specific_values:
                                 qty = float(specific_values.get('qty_available', 0.0))
                                 current_qty = variant.with_context(location=location.id).qty_available if location else 0.0
+                                
+                                _logger.info(f"Processing quantity update for {variant.display_name}:")
+                                _logger.info(f"  - Desired quantity: {qty}")
+                                _logger.info(f"  - Current quantity: {current_qty}")
                                 
                                 if location:
                                     if float_compare(qty, current_qty, precision_digits=2) != 0:
