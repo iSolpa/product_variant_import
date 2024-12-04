@@ -529,18 +529,17 @@ class ImportVariant(models.TransientModel):
                 if cost:
                     try:
                         specific_values['standard_price'] = float(cost)
-                        _logger.info(f"Setting cost price to {cost} for variant")
+                        _logger.info(f"Setting cost price to {cost} for variant with combination {value_combination}")
                     except (ValueError, TypeError) as e:
                         _logger.warning(f"Invalid cost value '{cost}': {str(e)}")
-                        specific_values['standard_price'] = 0.0
                 
                 # Handle quantity from either column name
-                qty_value = values.get('Qty On hand', values.get('Quantity', ''))
+                qty_value = values.get('Qty On Hand', values.get('Quantity', ''))
                 # Only process quantity if it's not blank
                 if qty_value.strip() if isinstance(qty_value, str) else qty_value:
                     specific_values['qty_available'] = float(qty_value or '0.0')
                 
-                # Only add barcode if it's not in the skip list
+                # Only add barcode if it's not blank
                 barcode = values.get('Barcode', '').strip()
                 if barcode:
                     specific_values['barcode'] = barcode
@@ -692,63 +691,39 @@ class ImportVariant(models.TransientModel):
                 _logger.info(f"Processing variant combination: {value_combination}")
                 _logger.debug(f"Specific values to update: {specific_values}")
                 
+                # Try exact match first
                 variant = variant_map.get(value_combination)
-                if variant:
-                    _logger.info(f"Found matching variant {variant.display_name} (ID: {variant.id}) for combination {value_combination}")
-                else:
-                    _logger.info(f"No existing variant found for combination {value_combination} - will attempt to create")
+                
+                # If no exact match, try case-insensitive matching
+                if not variant:
+                    _logger.info("No exact match found, trying case-insensitive match...")
+                    normalized_import_combo = tuple(v.lower().strip() for v in value_combination)
+                    for combo, var in variant_map.items():
+                        normalized_existing_combo = tuple(v.lower().strip() for v in combo)
+                        if normalized_import_combo == normalized_existing_combo:
+                            variant = var
+                            _logger.info(f"Found case-insensitive match: {combo}")
+                            break
                 
                 if variant:
-                    # Ensure barcode conflict check happens before any variant updates
-                    if 'barcode' in specific_values:
-                        can_use_barcode, conflicting_product = self._check_barcode_conflicts(specific_values['barcode'], variant)
-                        if not can_use_barcode:
-                            _logger.warning(
-                                f"Barcode {specific_values['barcode']} already assigned to {conflicting_product.display_name}")
-                            continue  # Skip this variant if barcode conflict exists
+                    _logger.info(f"Found matching variant {variant.display_name} (ID: {variant.id}) for combination {value_combination}")
                     
-                    # Proceed with variant update only after conflict check
-                    if specific_values:  # Only update if there are values to update
+                    # Update cost first if specified
+                    if 'standard_price' in specific_values:
                         try:
-                            # Update cost first if specified
-                            if 'standard_price' in specific_values:
-                                variant.write({'standard_price': specific_values['standard_price']})
-                                _logger.info(f"Updated cost price to {specific_values['standard_price']} for {variant.display_name}")
-                            
-                            # Update other values
-                            variant.write(specific_values)
-                            _logger.info(f"Updated variant {variant.display_name} with values {specific_values}")
-                            
-                            # Handle quantity updates through stock.quant
-                            if 'qty_available' in specific_values:
-                                qty = float(specific_values.get('qty_available', 0.0))
-                                current_qty = variant.with_context(location=location.id).qty_available if location else 0.0
-                                
-                                _logger.info(f"Processing quantity update for {variant.display_name}:")
-                                _logger.info(f"  - Desired quantity: {qty}")
-                                _logger.info(f"  - Current quantity: {current_qty}")
-                                
-                                if location:
-                                    if float_compare(qty, current_qty, precision_digits=2) != 0:
-                                        _logger.info(f"Creating stock quant for variant {variant.display_name}")
-                                        try:
-                                            # Create stock quant
-                                            quant = self.env['stock.quant'].create({
-                                                'product_id': variant.id,
-                                                'location_id': location.id,
-                                                'inventory_quantity': qty,
-                                            })
-                                            _logger.info(f"Created stock quant for {variant.display_name} (ID: {quant.id})")
-                                            
-                                            # Apply inventory
-                                            quant.action_apply_inventory()
-                                            _logger.info(f"Applied inventory for {variant.display_name}")
-                                        except Exception as e:
-                                            _logger.error(f"Error during stock quant adjustment for variant {variant.display_name}: {str(e)}", exc_info=True)
-                                else:
-                                    _logger.info(f"Skipping quantity update for variant {variant.display_name} (no quantity specified in import)")
+                            variant.write({'standard_price': specific_values['standard_price']})
+                            _logger.info(f"Updated cost price to {specific_values['standard_price']} for variant {variant.display_name}")
                         except Exception as e:
-                            _logger.error(f"Failed to update variant {variant.display_name}: {str(e)}", exc_info=True)
+                            _logger.error(f"Failed to update cost for variant {variant.display_name}: {str(e)}")
+                    
+                    # Update other values
+                    other_values = {k: v for k, v in specific_values.items() if k != 'standard_price'}
+                    if other_values:
+                        try:
+                            variant.write(other_values)
+                            _logger.info(f"Updated variant {variant.display_name} with values {other_values}")
+                        except Exception as e:
+                            _logger.error(f"Failed to update other values for variant {variant.display_name}: {str(e)}")
                 else:
                     # If variant doesn't exist, create it
                     try:
