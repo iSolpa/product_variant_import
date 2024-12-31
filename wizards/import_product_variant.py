@@ -218,13 +218,24 @@ class ImportVariant(models.TransientModel):
 
     def _check_barcode_conflicts(self, barcode, product=False):
         """Check if a barcode is already assigned to another product."""
-        conflicting_product = self.env['product.template'].search([
-            ('id', '!=', product.id if product else self.id),
-            '|',
-            ('barcode', '=', barcode),
-            ('product_variant_ids.barcode', '=', barcode)
-        ], limit=1)
-        return not conflicting_product, conflicting_product
+        if not barcode:
+            return True, False
+
+        domain = [('barcode', '=', barcode)]
+        if product:
+            domain.append(('id', '!=', product.id))
+            
+        existing_product = self.env['product.product'].search(domain, limit=1)
+        if not existing_product:
+            # Check product templates
+            domain = [('barcode', '=', barcode)]
+            if product and product.product_tmpl_id:
+                domain.append(('id', '!=', product.product_tmpl_id.id))
+            existing_template = self.env['product.template'].search(domain, limit=1)
+            if existing_template:
+                return False, existing_template
+                
+        return not bool(existing_product), existing_product
 
     def _process_csv_rows(self, rows, column_map):
         """Process CSV rows."""
@@ -301,12 +312,8 @@ class ImportVariant(models.TransientModel):
             for values in product_values_list:
                 barcode = values.get('Barcode', '').strip()
                 if barcode:
-                    existing_product = self.env['product.product'].search([
-                        '|',
-                        ('barcode', '=', barcode),
-                        ('product_tmpl_id.barcode', '=', barcode)
-                    ], limit=1)
-                    if existing_product:
+                    can_use_barcode, existing_product = self._check_barcode_conflicts(barcode)
+                    if not can_use_barcode:
                         _logger.info(f"Skipping product with existing barcode: {barcode} (create mode)")
                         return
                         
@@ -704,6 +711,14 @@ class ImportVariant(models.TransientModel):
                                 
                             if existing_variant and self.method != 'create':
                                 # Update existing variant
+                                if self.method == 'update_product':
+                                    # For update_product mode, if barcode exists and belongs to this variant, keep it
+                                    if specific_values.get('barcode'):
+                                        can_use_barcode, conflict_product = self._check_barcode_conflicts(specific_values['barcode'], existing_variant)
+                                        if not can_use_barcode:
+                                            _logger.warning(f"Barcode {specific_values['barcode']} already assigned to another product. Skipping barcode update for variant.")
+                                            specific_values.pop('barcode', None)
+                                    
                                 existing_variant.write(specific_values)
                                 existing_variant.product_template_attribute_value_ids = [(6, 0, template_attribute_values)]
                             else:
@@ -713,6 +728,14 @@ class ImportVariant(models.TransientModel):
                                     'product_template_attribute_value_ids': [(6, 0, template_attribute_values)]
                                 }
                                 variant_vals.update(specific_values)
+                                if self.method == 'update_product':
+                                    # For new variants in update_product mode, check barcode conflicts
+                                    if specific_values.get('barcode'):
+                                        can_use_barcode, conflict_product = self._check_barcode_conflicts(specific_values['barcode'])
+                                        if not can_use_barcode:
+                                            _logger.warning(f"Barcode {specific_values['barcode']} already assigned to another product. Skipping barcode for new variant.")
+                                            specific_values.pop('barcode', None)
+                                    
                                 new_variant = self.env['product.product'].create(variant_vals)
                                 
                                 # Create external ID for variant
@@ -723,8 +746,6 @@ class ImportVariant(models.TransientModel):
                                         'model': 'product.product',
                                         'res_id': new_variant.id,
                                     })
-                        else:
-                            _logger.error(f"Could not find all template attribute values for combination {value_combination}")
                     except Exception as e:
                         _logger.error(f"Failed to create variant with combination {value_combination}: {str(e)}", exc_info=True)
                         continue
