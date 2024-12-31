@@ -296,6 +296,20 @@ class ImportVariant(models.TransientModel):
             if existing_template:
                 _logger.info(f"Skipping existing product template: {group_key} (create mode)")
                 return
+                
+            # In create mode, check for duplicate barcodes before proceeding
+            for values in product_values_list:
+                barcode = values.get('Barcode', '').strip()
+                if barcode:
+                    existing_product = self.env['product.product'].search([
+                        '|',
+                        ('barcode', '=', barcode),
+                        ('product_tmpl_id.barcode', '=', barcode)
+                    ], limit=1)
+                    if existing_product:
+                        _logger.info(f"Skipping product with existing barcode: {barcode} (create mode)")
+                        return
+                        
             product_tmpl = False
         elif self.method == 'update':
             if not existing_template:
