@@ -8,7 +8,10 @@ from odoo.exceptions import UserError
 _logger = logging.getLogger(__name__)
 
 def process_category(env, category_name):
-    """Process product category."""
+    """Process product category with proper space handling."""
+    # Trim spaces from the entire category name
+    category_name = category_name.strip()
+    
     category = env['product.category'].search([
         '|',
         ('complete_name', '=', category_name),
@@ -19,8 +22,10 @@ def process_category(env, category_name):
         return category.id
     else:
         # Create new category if it doesn't exist
+        # Split by / and trim spaces for each category level
+        name = category_name.split('/')[0].strip()
         category = env['product.category'].create({
-            'name': category_name.split('/')[0],
+            'name': name,
             'complete_name': category_name
         })
         return category.id
