@@ -338,9 +338,9 @@ class ImportVariant(models.TransientModel):
         # Step 2: Search for existing template
         template_values = product_values_list[0].copy()
         # Get template identifier
-        template_identifier = template_values.get('Template Unique Identifier', '').strip()
+        template_identifier = template_values.get('Template Internal Reference') or template_values.get('Internal Reference')
         _logger.info(f"Template identifier from CSV: {template_identifier}")
-        template_ref = template_values.get('Template Internal Reference', '').strip()
+        template_ref = template_values.get('Template Internal Reference') or template_values.get('Internal Reference')
         _logger.info(f"Template reference from CSV: {template_ref}")
         product_tmpl = self._find_existing_template(template_values)
         
@@ -535,14 +535,19 @@ class ImportVariant(models.TransientModel):
         """Create or update a product variant"""
         _logger.info(f"Creating or updating variant for {product_tmpl.name}")
         
-        # First try to find the variant by its combination
+        # Lock at transaction level to prevent concurrent variant creation
+        self.env.cr.execute("SELECT id FROM product_template WHERE id = %s FOR UPDATE", (product_tmpl.id,))
+        
+        # Refresh the product template from database to ensure we have latest data
+        product_tmpl.invalidate_cache()
+        product_tmpl = product_tmpl.browse(product_tmpl.id)
+        
+        # First try to find the variant by combination
         variant = self._find_variant_by_combination(product_tmpl, values)
         
-        # If no variant found by combination, try by internal reference
         if not variant and values.get('Internal Reference'):
             variant = self._find_existing_variant_by_default_code(product_tmpl, values)
-            
-        # If still no variant found, try by barcode
+        
         if not variant and values.get('Barcode'):
             variant = self.env['product.product'].search([
                 ('barcode', '=', values['Barcode']),
@@ -552,64 +557,52 @@ class ImportVariant(models.TransientModel):
         # If no variant found and we have attribute values, try to create one
         if not variant and values.get('Variant Attributes') and values.get('Attribute Values'):
             try:
-                # Prepare the variant values including the attribute value ids
-                variant_vals = {
-                    'product_tmpl_id': product_tmpl.id,
-                }
+                attribute_names = [name.strip() for name in values['Variant Attributes'].split(',')]
+                attribute_values = [value.strip() for value in values['Attribute Values'].split(';')]
+                
+                if len(attribute_names) != len(attribute_values):
+                    _logger.warning(f"Mismatch in attribute counts for {product_tmpl.name}")
+                    return False
 
-                # Handle attribute values
-                if values.get('Variant Attributes') and values.get('Attribute Values'):
-                    attribute_names = [name.strip() for name in values['Variant Attributes'].split(',')]
-                    attribute_values = [value.strip() for value in values['Attribute Values'].split(';')]
+                # Get all product template attribute lines
+                template_attribute_lines = product_tmpl.attribute_line_ids
+                
+                # Build the attribute value combination
+                value_combination = []
+                for attr_name, attr_value in zip(attribute_names, attribute_values):
+                    attr_line = template_attribute_lines.filtered(
+                        lambda l: l.attribute_id.name == attr_name
+                    )
+                    if not attr_line:
+                        _logger.warning(f"Attribute {attr_name} not found in template {product_tmpl.name}")
+                        continue
+
+                    attr_value_id = attr_line.value_ids.filtered(
+                        lambda v: v.name == attr_value
+                    )
+                    if not attr_value_id:
+                        _logger.warning(f"Value {attr_value} not found for attribute {attr_name}")
+                        continue
+
+                    ptav = self.env['product.template.attribute.value'].search([
+                        ('product_tmpl_id', '=', product_tmpl.id),
+                        ('product_attribute_value_id', '=', attr_value_id.id)
+                    ], limit=1)
                     
-                    _logger.info(f"Processing attributes for variant: {attribute_names} with values: {attribute_values}")
-                    
-                    if len(attribute_names) != len(attribute_values):
-                        _logger.warning(f"Mismatch in attribute counts for {product_tmpl.name}")
+                    if ptav:
+                        value_combination.append(ptav.id)
+
+                if value_combination:
+                    # Use Odoo's native variant creation mechanism
+                    variant = product_tmpl._create_product_variant(
+                        product_template_attribute_value_ids=[(6, 0, value_combination)]
+                    )
+                    if variant:
+                        _logger.info(f"Created new variant for {product_tmpl.name}")
+                    else:
+                        _logger.warning(f"Failed to create variant for {product_tmpl.name}")
                         return False
 
-                    # Get all product template attribute lines
-                    template_attribute_lines = product_tmpl.attribute_line_ids
-                    _logger.info(f"Template attribute lines: {template_attribute_lines.mapped('attribute_id.name')}")
-
-                    # Collect attribute value IDs in the order they appear in the template
-                    attribute_value_ids = []
-                    for attr_name, attr_value in zip(attribute_names, attribute_values):
-                        # Find the attribute line for this attribute
-                        attr_line = template_attribute_lines.filtered(
-                            lambda l: l.attribute_id.name == attr_name
-                        )
-                        if not attr_line:
-                            _logger.warning(f"Attribute {attr_name} not found in template {product_tmpl.name}")
-                            continue
-
-                        # Find the attribute value
-                        attr_value_id = attr_line.value_ids.filtered(
-                            lambda v: v.name == attr_value
-                        )
-                        if not attr_value_id:
-                            _logger.warning(f"Value {attr_value} not found for attribute {attr_name}")
-                            continue
-
-                        # Get the product template attribute value
-                        ptav = self.env['product.template.attribute.value'].search([
-                            ('product_tmpl_id', '=', product_tmpl.id),
-                            ('product_attribute_value_id', '=', attr_value_id.id)
-                        ], limit=1)
-                        
-                        if ptav:
-                            attribute_value_ids.append(ptav.id)
-                            _logger.info(f"Found template attribute value ID: {ptav.id}")
-                        else:
-                            _logger.warning(f"No template attribute value found for {attr_value} in {attr_name}")
-
-                    if attribute_value_ids:
-                        variant_vals['product_template_attribute_value_ids'] = [(6, 0, attribute_value_ids)]
-                        _logger.info(f"Setting attribute values for variant: {attribute_value_ids}")
-
-                # Create the variant with proper attribute values
-                variant = self.env['product.product'].create(variant_vals)
-                _logger.info(f"Created new variant for {product_tmpl.name}")
             except Exception as e:
                 _logger.error(f"Failed to create variant: {str(e)}")
                 return False
@@ -649,9 +642,9 @@ class ImportVariant(models.TransientModel):
                 cost_value = float(values['Cost'])
                 update_vals['standard_price'] = cost_value
                 _logger.info(f"Setting cost price to {cost_value} for variant with combination {values.get('Variant Attributes')}")
-            except (ValueError, TypeError) as e:
-                _logger.warning(f"Invalid cost value '{cost_value}': {str(e)}")
-
+            except (ValueError, TypeError):
+                _logger.warning(f"Invalid cost value: {values['Cost']}")
+        
         # Handle quantity from either column name
         qty_value = values.get('Qty On Hand', values.get('Quantity', ''))
         if qty_value.strip() if isinstance(qty_value, str) else qty_value:
