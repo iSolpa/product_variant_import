@@ -323,7 +323,6 @@ class ImportVariant(models.TransientModel):
         4. Create template variants
         5. Store database IDs for later use
         6. Create external IDs for template and variants
-        7. Update internal references and barcodes with conflict checking
         """
         _logger.info(f"Processing product template: {group_key}")
         
@@ -359,14 +358,8 @@ class ImportVariant(models.TransientModel):
         # Step 4 & 5: Process variants and store their IDs
         processed_variants = self._process_variants(product_tmpl, product_values_list)
         
-        # Step 6: Create external IDs
+        # Step 6: Create external IDs for template
         self._create_template_external_ids(product_tmpl, template_values)
-        for variant_data in processed_variants:
-            self._create_variant_external_ids(variant_data['variant'], variant_data['values'])
-        
-        # Step 7: Update references and barcodes
-        for variant_data in processed_variants:
-            self._update_variant_identifiers(variant_data['variant'], variant_data['values'])
         
         return product_tmpl
 
@@ -536,27 +529,6 @@ class ImportVariant(models.TransientModel):
                     'product_tmpl_id': product_tmpl.id,
                 }
 
-                # Handle internal reference
-                internal_ref = values.get('Internal Reference', '').strip()
-                if internal_ref:
-                    variant_vals['default_code'] = internal_ref
-                elif values.get('Default Code', '').strip():
-                    variant_vals['default_code'] = values.get('Default Code').strip()
-
-                # Handle barcode
-                barcode = values.get('Barcode', '').strip()
-                if barcode:
-                    variant_vals['barcode'] = barcode
-
-                # Handle cost price
-                cost = values.get('Cost', '').strip()
-                if cost:
-                    try:
-                        variant_vals['standard_price'] = float(cost)
-                        _logger.info(f"Setting cost price to {cost} for variant with combination {values.get('Variant Attributes')}")
-                    except (ValueError, TypeError) as e:
-                        _logger.warning(f"Invalid cost value '{cost}': {str(e)}")
-
                 # Handle attribute values
                 if values.get('Variant Attributes') and values.get('Attribute Values'):
                     attribute_names = [name.strip() for name in values['Variant Attributes'].split(',')]
@@ -607,7 +579,7 @@ class ImportVariant(models.TransientModel):
             except Exception as e:
                 _logger.error(f"Failed to create variant: {str(e)}")
                 return False
-        
+
         if not variant:
             _logger.warning(f"Could not find or create variant for {product_tmpl.name}")
             return False
@@ -615,25 +587,27 @@ class ImportVariant(models.TransientModel):
         # Update variant values
         update_vals = {}
         
-        # Handle internal reference
-        if values.get('Internal Reference'):
+        # Handle internal reference from the variant-specific column
+        variant_ref = values.get('Variant Internal Reference', '').strip()
+        if variant_ref:
             existing_product = self.env['product.product'].search([
-                ('default_code', '=', values['Internal Reference']),
+                ('default_code', '=', variant_ref),
                 ('id', '!=', variant.id)
             ], limit=1)
             if not existing_product:
-                update_vals['default_code'] = values['Internal Reference']
-                _logger.info(f"Setting internal reference {values['Internal Reference']} for variant")
+                update_vals['default_code'] = variant_ref
+                _logger.info(f"Setting internal reference {variant_ref} for variant")
         
-        # Handle barcode
-        if values.get('Barcode'):
+        # Handle barcode from the variant-specific column
+        variant_barcode = values.get('Variant Barcode', '').strip()
+        if variant_barcode:
             existing_product = self.env['product.product'].search([
-                ('barcode', '=', values['Barcode']),
+                ('barcode', '=', variant_barcode),
                 ('id', '!=', variant.id)
             ], limit=1)
             if not existing_product:
-                update_vals['barcode'] = values['Barcode']
-                _logger.info(f"Setting barcode {values['Barcode']} for variant")
+                update_vals['barcode'] = variant_barcode
+                _logger.info(f"Setting barcode {variant_barcode} for variant")
         
         # Handle cost
         if values.get('Cost'):
@@ -651,31 +625,36 @@ class ImportVariant(models.TransientModel):
             except Exception as e:
                 _logger.error(f"Failed to update variant values: {str(e)}")
         
+        # Create external IDs for the variant
+        self._create_variant_external_ids(variant, values)
+        
         return variant
 
     def _update_variant_identifiers(self, variant, values):
         """Update variant identifiers and cost"""
         update_vals = {}
         
-        # Handle internal reference
-        if values.get('Internal Reference'):
+        # Handle internal reference from the variant-specific column
+        variant_ref = values.get('Variant Internal Reference', '').strip()
+        if variant_ref:
             existing_product = self.env['product.product'].search([
-                ('default_code', '=', values['Internal Reference']),
+                ('default_code', '=', variant_ref),
                 ('id', '!=', variant.id)
             ], limit=1)
             if not existing_product:
-                update_vals['default_code'] = values['Internal Reference']
-                _logger.info(f"Setting internal reference {values['Internal Reference']} for variant")
+                update_vals['default_code'] = variant_ref
+                _logger.info(f"Setting internal reference {variant_ref} for variant")
         
-        # Handle barcode
-        if values.get('Barcode'):
+        # Handle barcode from the variant-specific column
+        variant_barcode = values.get('Variant Barcode', '').strip()
+        if variant_barcode:
             existing_product = self.env['product.product'].search([
-                ('barcode', '=', values['Barcode']),
+                ('barcode', '=', variant_barcode),
                 ('id', '!=', variant.id)
             ], limit=1)
             if not existing_product:
-                update_vals['barcode'] = values['Barcode']
-                _logger.info(f"Setting barcode {values['Barcode']} for variant")
+                update_vals['barcode'] = variant_barcode
+                _logger.info(f"Setting barcode {variant_barcode} for variant")
         
         # Handle cost
         if values.get('Cost'):
@@ -707,7 +686,7 @@ class ImportVariant(models.TransientModel):
 
     def _create_variant_external_ids(self, variant, values):
         """Create external IDs for variant"""
-        variant_ref = values.get('Internal Reference') or values.get('Default Code')
+        variant_ref = values.get('Variant Internal Reference', '').strip()
         if variant_ref:
             external_id = f"product_product_{variant_ref.replace(' ', '_').lower()}"
             self._create_external_id(variant, external_id)
@@ -916,23 +895,7 @@ class ImportVariant(models.TransientModel):
 
         return vals
 
-    def _find_existing_variant(self, product_tmpl, values):
-        """Find existing variant by default_code or barcode"""
-        Product = self.env['product.product']
-        
-        # Try to find existing variant
-        variant = self._find_existing_variant_by_default_code(product_tmpl, values)
-        if not variant:
-            barcode = values.get('Barcode', '').strip()
-            if barcode:
-                variant = Product.search([
-                    ('barcode', '=', barcode),
-                    ('product_tmpl_id', '=', product_tmpl.id)
-                ], limit=1)
-        
-        return variant
-
-    def _find_existing_variant_by_default_code(self, product_tmpl, values):
+    def _find_variant_by_default_code(self, product_tmpl, values):
         """Find existing variant by default_code"""
         Product = self.env['product.product']
         
