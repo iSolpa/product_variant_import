@@ -486,38 +486,48 @@ class ImportVariant(models.TransientModel):
         """Find variant by its attribute combination"""
         if not (values.get('Variant Attributes') and values.get('Attribute Values')):
             return False
-            
-        attribute_names = values['Variant Attributes'].split(',')
-        attribute_values = values['Attribute Values'].split(';')
+        
+        attribute_names = [name.strip() for name in values['Variant Attributes'].split(',')]
+        attribute_values = [value.strip() for value in values['Attribute Values'].split(';')]
         
         if len(attribute_names) != len(attribute_values):
             _logger.warning(f"Mismatch in attribute counts for {product_tmpl.name}")
             return False
-            
-        # Get all product variants
-        variants = product_tmpl.product_variant_ids
+
+        # Lock the product template to prevent concurrent variant creation
+        self.env.cr.execute("""
+            SELECT id FROM product_template 
+            WHERE id = %s 
+            FOR UPDATE NOWAIT
+        """, (product_tmpl.id,))
         
-        # For each variant, check if it matches our combination
+        # Get all product variants with a fresh query
+        variants = self.env['product.product'].search([
+            ('product_tmpl_id', '=', product_tmpl.id)
+        ])
+        
+        # Create a set of attribute value combinations for faster lookup
+        variant_combinations = {}
         for variant in variants:
-            variant_attributes = variant.product_template_attribute_value_ids
-            matches = True
+            key_parts = []
+            for attr_name in attribute_names:
+                attr_value = variant.product_template_attribute_value_ids.filtered(
+                    lambda x: x.attribute_id.name == attr_name
+                ).product_attribute_value_id.name
+                if attr_value:
+                    key_parts.append((attr_name, attr_value))
+            if key_parts:
+                variant_combinations[tuple(sorted(key_parts))] = variant
+
+        # Create key for the current combination
+        current_combination = tuple(sorted(zip(attribute_names, attribute_values)))
+        
+        # Look for exact match
+        matching_variant = variant_combinations.get(current_combination)
+        if matching_variant:
+            _logger.info(f"Found matching variant for combination: {values['Attribute Values']}")
+            return matching_variant
             
-            # Check each attribute value
-            for attr_name, attr_value in zip(attribute_names, attribute_values):
-                attr_value = attr_value.strip()
-                # Find matching template attribute value
-                matching_attr = variant_attributes.filtered(
-                    lambda x: x.attribute_id.name == attr_name.strip() and 
-                            x.product_attribute_value_id.name == attr_value
-                )
-                if not matching_attr:
-                    matches = False
-                    break
-                    
-            if matches:
-                _logger.info(f"Found matching variant for combination: {values['Attribute Values']}")
-                return variant
-                
         _logger.info(f"No matching variant found for combination: {values['Attribute Values']}")
         return False
 
@@ -580,8 +590,6 @@ class ImportVariant(models.TransientModel):
                         if not attr_value_id:
                             _logger.warning(f"Value {attr_value} not found for attribute {attr_name}")
                             continue
-
-                        _logger.info(f"Found attribute value: {attr_value} for {attr_name}")
 
                         # Get the product template attribute value
                         ptav = self.env['product.template.attribute.value'].search([
