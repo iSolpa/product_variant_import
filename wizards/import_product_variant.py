@@ -587,27 +587,27 @@ class ImportVariant(models.TransientModel):
         # Update variant values
         update_vals = {}
         
-        # Handle internal reference from the variant-specific column
-        variant_ref = values.get('Variant Internal Reference', '').strip()
-        if variant_ref:
+        # Handle internal reference
+        internal_ref = values.get('Internal Reference', '').strip()
+        if internal_ref:
             existing_product = self.env['product.product'].search([
-                ('default_code', '=', variant_ref),
+                ('default_code', '=', internal_ref),
                 ('id', '!=', variant.id)
             ], limit=1)
             if not existing_product:
-                update_vals['default_code'] = variant_ref
-                _logger.info(f"Setting internal reference {variant_ref} for variant")
+                update_vals['default_code'] = internal_ref
+                _logger.info(f"Setting internal reference {internal_ref} for variant")
         
-        # Handle barcode from the variant-specific column
-        variant_barcode = values.get('Variant Barcode', '').strip()
-        if variant_barcode:
+        # Handle barcode
+        barcode = values.get('Barcode', '').strip()
+        if barcode:
             existing_product = self.env['product.product'].search([
-                ('barcode', '=', variant_barcode),
+                ('barcode', '=', barcode),
                 ('id', '!=', variant.id)
             ], limit=1)
             if not existing_product:
-                update_vals['barcode'] = variant_barcode
-                _logger.info(f"Setting barcode {variant_barcode} for variant")
+                update_vals['barcode'] = barcode
+                _logger.info(f"Setting barcode {barcode} for variant")
         
         # Handle cost
         if values.get('Cost'):
@@ -634,27 +634,27 @@ class ImportVariant(models.TransientModel):
         """Update variant identifiers and cost"""
         update_vals = {}
         
-        # Handle internal reference from the variant-specific column
-        variant_ref = values.get('Variant Internal Reference', '').strip()
-        if variant_ref:
+        # Handle internal reference
+        internal_ref = values.get('Internal Reference', '').strip()
+        if internal_ref:
             existing_product = self.env['product.product'].search([
-                ('default_code', '=', variant_ref),
+                ('default_code', '=', internal_ref),
                 ('id', '!=', variant.id)
             ], limit=1)
             if not existing_product:
-                update_vals['default_code'] = variant_ref
-                _logger.info(f"Setting internal reference {variant_ref} for variant")
+                update_vals['default_code'] = internal_ref
+                _logger.info(f"Setting internal reference {internal_ref} for variant")
         
-        # Handle barcode from the variant-specific column
-        variant_barcode = values.get('Variant Barcode', '').strip()
-        if variant_barcode:
+        # Handle barcode
+        barcode = values.get('Barcode', '').strip()
+        if barcode:
             existing_product = self.env['product.product'].search([
-                ('barcode', '=', variant_barcode),
+                ('barcode', '=', barcode),
                 ('id', '!=', variant.id)
             ], limit=1)
             if not existing_product:
-                update_vals['barcode'] = variant_barcode
-                _logger.info(f"Setting barcode {variant_barcode} for variant")
+                update_vals['barcode'] = barcode
+                _logger.info(f"Setting barcode {barcode} for variant")
         
         # Handle cost
         if values.get('Cost'):
@@ -686,7 +686,7 @@ class ImportVariant(models.TransientModel):
 
     def _create_variant_external_ids(self, variant, values):
         """Create external IDs for variant"""
-        variant_ref = values.get('Variant Internal Reference', '').strip()
+        variant_ref = values.get('Internal Reference', '').strip()
         if variant_ref:
             external_id = f"product_product_{variant_ref.replace(' ', '_').lower()}"
             self._create_external_id(variant, external_id)
