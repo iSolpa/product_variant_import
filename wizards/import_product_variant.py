@@ -335,6 +335,11 @@ class ImportVariant(models.TransientModel):
         
         # Step 2: Search for existing template
         template_values = product_values_list[0].copy()
+        # Get template identifier
+        template_identifier = template_values.get('Template Unique Identifier', '').strip()
+        _logger.info(f"Template identifier from CSV: {template_identifier}")
+        template_ref = template_values.get('Template Internal Reference', '').strip()
+        _logger.info(f"Template reference from CSV: {template_ref}")
         product_tmpl = self._find_existing_template(template_values)
         
         # Step 3: Create template if it doesn't exist
@@ -422,23 +427,34 @@ class ImportVariant(models.TransientModel):
         template_ref = template_values.get('Template Internal Reference') or template_values.get('Internal Reference')
         if template_ref:
             external_id = f"product_tmpl_{template_ref.replace(' ', '_').lower()}"
+            _logger.info(f"Searching template by external ID: {external_id}")
             template = self.env.ref(f'__import__.{external_id}', raise_if_not_found=False)
             if template:
+                _logger.info(f"Found template by external ID. ID: {template.id}, Name: {template.name}")
                 return template
         
         # Try finding by internal reference
         if template_ref:
+            _logger.info(f"Searching template by default_code: {template_ref}")
             template = ProductTemplate.search([('default_code', '=', template_ref)], limit=1)
             if template:
+                _logger.info(f"Found template by default_code. ID: {template.id}, Name: {template.name}")
                 return template
+            else:
+                _logger.info(f"No template found with default_code: {template_ref}")
         
         # Try finding by barcode
         barcode = template_values.get('Barcode', '').strip()
         if barcode:
+            _logger.info(f"Searching template by barcode: {barcode}")
             template = ProductTemplate.search([('barcode', '=', barcode)], limit=1)
             if template:
+                _logger.info(f"Found template by barcode. ID: {template.id}, Name: {template.name}")
                 return template
+            else:
+                _logger.info(f"No template found with barcode: {barcode}")
         
+        _logger.warning("No template found by any method")
         return False
 
     def _create_product_template(self, template_values):
@@ -614,7 +630,7 @@ class ImportVariant(models.TransientModel):
             try:
                 cost_value = float(values['Cost'])
                 update_vals['standard_price'] = cost_value
-                _logger.info(f"Setting cost price to {cost_value} for variant with combination {values.get('Variant Attributes', '')}")
+                _logger.info(f"Setting cost price to {cost_value} for variant with combination {values.get('Variant Attributes')}")
             except (ValueError, TypeError):
                 _logger.warning(f"Invalid cost value: {values['Cost']}")
         
@@ -661,7 +677,7 @@ class ImportVariant(models.TransientModel):
             try:
                 cost_value = float(values['Cost'])
                 update_vals['standard_price'] = cost_value
-                _logger.info(f"Setting cost price to {cost_value} for variant with combination {values.get('Variant Attributes', '')}")
+                _logger.info(f"Setting cost price to {cost_value} for variant with combination {values.get('Variant Attributes')}")
             except (ValueError, TypeError):
                 _logger.warning(f"Invalid cost value: {values['Cost']}")
         
