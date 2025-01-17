@@ -539,8 +539,9 @@ class ImportVariant(models.TransientModel):
         self.env.cr.execute("SELECT id FROM product_template WHERE id = %s FOR UPDATE", (product_tmpl.id,))
         
         # Refresh the product template from database to ensure we have latest data
-        product_tmpl.invalidate_cache()
-        product_tmpl = product_tmpl.browse(product_tmpl.id)
+        product_tmpl.flush_recordset()  # Flush any pending changes
+        product_tmpl.invalidate_recordset()  # Invalidate cache in Odoo 17
+        product_tmpl = self.env['product.template'].browse(product_tmpl.id)
         
         # First try to find the variant by combination
         variant = self._find_variant_by_combination(product_tmpl, values)
@@ -564,8 +565,10 @@ class ImportVariant(models.TransientModel):
                     _logger.warning(f"Mismatch in attribute counts for {product_tmpl.name}")
                     return False
 
-                # Get all product template attribute lines
-                template_attribute_lines = product_tmpl.attribute_line_ids
+                # Get all product template attribute lines with a fresh query
+                template_attribute_lines = self.env['product.template.attribute.line'].search([
+                    ('product_tmpl_id', '=', product_tmpl.id)
+                ])
                 
                 # Build the attribute value combination
                 value_combination = []
@@ -593,10 +596,14 @@ class ImportVariant(models.TransientModel):
                         value_combination.append(ptav.id)
 
                 if value_combination:
-                    # Use Odoo's native variant creation mechanism
-                    variant = product_tmpl._create_product_variant(
-                        product_template_attribute_value_ids=[(6, 0, value_combination)]
+                    # Ensure we have the latest state before creating variant
+                    self.env.cr.commit()  # Commit current transaction
+                    
+                    # Use Odoo's native variant creation mechanism in a new transaction
+                    variant = product_tmpl.with_context(create_product_product=True)._create_product_variant(
+                        product_template_attribute_value_ids=value_combination
                     )
+                    
                     if variant:
                         _logger.info(f"Created new variant for {product_tmpl.name}")
                     else:
