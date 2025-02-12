@@ -331,7 +331,17 @@ class ImportVariant(models.TransientModel):
 
         # Step 2: Search for existing template
         template_values = product_values_list[0].copy()
-        template_unique_identifier = template_values.get('Template Unique Identifier', '').strip()
+        
+        # Handle BOM in CSV headers
+        def remove_bom(s):
+            return s.encode('utf-8').decode('utf-8-sig')
+        
+        template_unique_identifier = None
+        for key in template_values:
+            if remove_bom(key) == 'Template Unique Identifier':
+                template_unique_identifier = template_values[key].strip() if template_values[key] else ''
+                break
+        
         template_ref = template_values.get('Template Internal Reference', '').strip()
         _logger.info(f"Template identifier from CSV: '{template_unique_identifier}'")
         _logger.info(f"Template reference from CSV: '{template_ref}'")
