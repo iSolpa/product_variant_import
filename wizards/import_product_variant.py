@@ -550,11 +550,11 @@ class ImportVariant(models.TransientModel):
                         'combination_indices': ','.join(map(str, sorted(value_combination)))
                     })
                 else:
-                    # If no valid attribute combination is built, use the existing default variant to avoid duplicate key error
+                    # If no valid attribute combination is built, look for the default variant where combination_indices is empty, False, or None
                     variant = self.env['product.product'].search([
                         ('product_tmpl_id', '=', product_tmpl.id),
-                        ('combination_indices', '=', '')
-                    ], limit=1) or product_tmpl.product_variant_id
+                        ('combination_indices', 'in', ('', False, None))
+                    ], limit=1) or (product_tmpl.product_variant_id if hasattr(product_tmpl, 'product_variant_id') else False)
 
             except Exception as e:
                 _logger.error(f"Error creating variant: {e}")
