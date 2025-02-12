@@ -873,12 +873,20 @@ class ImportVariant(models.TransientModel):
         """Create a new product template with the given values."""
         ProductTemplate = self.env['product.template']
         
+        # Check one more time with a clean transaction
+        template_ref = template_values.get('Template Internal Reference') or template_values.get('Internal Reference')
+        self.env.cr.commit()  # Commit any pending transactions
+        existing = ProductTemplate.search([('default_code', '=', template_ref)], limit=1)
+        if existing:
+            _logger.info(f"Found template in new transaction. ID: {existing.id}, Name: {existing.name}")
+            return existing
+        
         # Get category
         category_id = self._get_category_id(template_values.get('Category'))
         
         vals = {
             'name': template_values['Name'],
-            'default_code': template_values.get('Template Internal Reference') or template_values.get('Internal Reference'),
+            'default_code': template_ref,
             'barcode': template_values.get('Barcode'),
             'type': 'product',
             'categ_id': category_id,
@@ -887,12 +895,40 @@ class ImportVariant(models.TransientModel):
             'available_in_pos': template_values.get('Available in POS', 'TRUE').upper() == 'TRUE',
         }
         
+        # Process image if provided
+        image_url = template_values.get('Image')
+        if image_url:
+            _logger.info(f"Processing image from URL: {image_url}")
+            try:
+                response = requests.get(image_url, timeout=10)
+                if response.status_code == 200:
+                    image_data = base64.b64encode(response.content)
+                    vals['image_1920'] = image_data.decode('utf-8')
+                    _logger.info(f"Successfully processed image from {image_url}")
+                else:
+                    _logger.warning(f"Failed to fetch image from {image_url}: Status code {response.status_code}")
+            except Exception as e:
+                _logger.warning(f"Error processing image {image_url}: {str(e)}")
+        else:
+            _logger.info("No image URL found in template values")
+            _logger.debug(f"Available fields in template_values: {list(template_values.keys())}")
+        
         template = ProductTemplate.create(vals)
+        self.env.cr.commit()  # Commit immediately after creation
+        
+        # Double check the template was created
+        template = ProductTemplate.browse(template.id)
+        if not template.exists():
+            _logger.error(f"Failed to create template with reference: {template_ref}")
+            return None
+            
+        _logger.info(f"Successfully created template. ID: {template.id}, Name: {template.name}")
         
         # Prepare and set attribute lines
         attr_lines = self._prepare_attribute_lines(template_values, template)
         if attr_lines:
             template.write({'attribute_line_ids': attr_lines})
+            self.env.cr.commit()  # Commit after adding attribute lines
             
         return template
 
