@@ -547,72 +547,97 @@ class ImportVariant(models.TransientModel):
                         value_combination.append(ptav.id)
 
                 if value_combination:
-                    variant = self.env['product.product'].create({
-                        'product_tmpl_id': product_tmpl.id,
-                        'combination_indices': ','.join(map(str, sorted(value_combination)))
-                    })
+                    try:
+                        variant = self.env['product.product'].create({
+                            'product_tmpl_id': product_tmpl.id,
+                            'combination_indices': ','.join(map(str, sorted(value_combination)))
+                        })
+                    except Exception as e:
+                        if 'duplicate key value violates unique constraint' in str(e):
+                            _logger.info(f'Skipping duplicate variant creation for template {product_tmpl.id}')
+                            # Try to get the existing variant one last time
+                            existing_variants = self.env['product.product'].search([
+                                ('product_tmpl_id', '=', product_tmpl.id),
+                                ('combination_indices', '=', ','.join(map(str, sorted(value_combination))))
+                            ], order='id', limit=1)
+                            if existing_variants:
+                                variant = existing_variants[0]
+                            return variant  # Return whatever we found or False
+                        else:
+                            _logger.error(f'Error creating variant: {str(e)}')
+                            return False
                 else:
                     # For default variant (no attribute values), first check product_variant_id
                     _logger.info(f'Checking default variant for template {product_tmpl.name} (ID: {product_tmpl.id})')
                     
-                    # First try to find existing variant through product_variant_id
-                    variant = False
-                    if product_tmpl.product_variant_id:
-                        variant = product_tmpl.product_variant_id
-                        _logger.info(f'Found product_variant_id: {variant.id}')
-                    
-                    if not variant:
-                        # Search for existing variants, ordered by id to ensure consistent selection
-                        existing_variants = self.env['product.product'].with_context(active_test=False).search([
-                            ('product_tmpl_id', '=', product_tmpl.id),
-                            '|',
-                            ('combination_indices', '=', ''),
-                            ('combination_indices', '=', False)
-                        ], order='id')
+                    try:
+                        # First try to find existing variant through product_variant_id
+                        variant = False
+                        if product_tmpl.product_variant_id:
+                            variant = product_tmpl.product_variant_id
+                            _logger.info(f'Found product_variant_id: {variant.id}')
                         
-                        if existing_variants:
-                            variant = existing_variants[0]
-                            _logger.info(f'Found existing variant: {variant.id}')
-                        else:
-                            try:
-                                # Lock the template to prevent concurrent creation
-                                self.env.cr.execute("""
-                                    SELECT id 
-                                    FROM product_template 
-                                    WHERE id = %s 
-                                    FOR UPDATE NOWAIT
-                                """, (product_tmpl.id,))
-                                
-                                # Create new variant directly to avoid computed fields
-                                self.env.cr.execute("""
-                                    INSERT INTO product_product 
-                                    (product_tmpl_id, combination_indices, create_uid, create_date, write_uid, write_date)
-                                    VALUES (%s, '', %s, now(), %s, now())
-                                    RETURNING id
-                                """, (product_tmpl.id, self.env.uid, self.env.uid))
-                                
-                                new_variant_id = self.env.cr.fetchone()[0]
-                                variant = self.env['product.product'].browse(new_variant_id)
-                                _logger.info(f'Created new variant: {variant.id}')
-                                
-                            except Exception as e:
-                                _logger.error(f'Error creating variant: {str(e)}')
-                                return False
+                        if not variant:
+                            # Search for existing variants, ordered by id to ensure consistent selection
+                            existing_variants = self.env['product.product'].search([
+                                ('product_tmpl_id', '=', product_tmpl.id),
+                                '|',
+                                ('combination_indices', '=', ''),
+                                ('combination_indices', '=', False)
+                            ], order='id')
+                            
+                            if existing_variants:
+                                variant = existing_variants[0]
+                                _logger.info(f'Found existing variant: {variant.id}')
+                            else:
+                                try:
+                                    with self.env.cr.savepoint():
+                                        variant_vals = {
+                                            'product_tmpl_id': product_tmpl.id,
+                                            'combination_indices': '',  # Explicitly set empty string
+                                        }
+                                        variant = self.env['product.product'].create(variant_vals)
+                                        _logger.info(f'Created new variant: {variant.id}')
+                                except Exception as e:
+                                    if 'duplicate key value violates unique constraint' in str(e):
+                                        _logger.info(f'Skipping duplicate variant creation for template {product_tmpl.id}')
+                                        # Try to get the existing variant one last time
+                                        existing_variants = self.env['product.product'].search([
+                                            ('product_tmpl_id', '=', product_tmpl.id),
+                                            '|',
+                                            ('combination_indices', '=', ''),
+                                            ('combination_indices', '=', False)
+                                        ], order='id', limit=1)
+                                        if existing_variants:
+                                            variant = existing_variants[0]
+                                        return variant  # Return whatever we found or False
+                                    else:
+                                        _logger.error(f'Error creating variant: {str(e)}')
+                                        return False
                     
-                    # If we found or created a variant, ensure it has the correct combination_indices
-                    if variant and not variant.combination_indices:
-                        try:
-                            self.env.cr.execute("""
-                                UPDATE product_product 
-                                SET combination_indices = ''
-                                WHERE id = %s
-                            """, (variant.id,))
-                        except Exception as e:
-                            _logger.error(f'Error updating combination_indices: {str(e)}')
-            except Exception as e:
-                _logger.error(f"Error creating variant: {e}")
-                return False
-
+                        # If we found or created a variant, update its values
+                        if variant:
+                            try:
+                                variant.write({
+                                    'default_code': values.get('Internal Reference'),
+                                    'barcode': values.get('Barcode'),
+                                })
+                            except Exception as e:
+                                if 'duplicate key value violates unique constraint' in str(e):
+                                    _logger.info(f'Skipping duplicate variant update for variant {variant.id}')
+                                else:
+                                    _logger.error(f'Error updating variant {variant.id}: {str(e)}')
+                                return variant  # Return the variant even if update failed
+                        
+                        return variant
+                
+                    except Exception as e:
+                        if 'duplicate key value violates unique constraint' in str(e):
+                            _logger.info(f'Skipping duplicate variant operation for template {product_tmpl.id}')
+                            return True  # Continue processing
+                        _logger.error(f'Unexpected error in variant operation: {str(e)}')
+                        return False
+        
         # Update variant values
         update_vals = {}
         
@@ -696,7 +721,10 @@ class ImportVariant(models.TransientModel):
                 variant.write(update_vals)
                 _logger.info(f"Successfully updated variant with values: {update_vals}")
             except Exception as e:
-                _logger.error(f"Failed to update variant values: {str(e)}")
+                if 'duplicate key value violates unique constraint' in str(e):
+                    _logger.info(f'Skipping duplicate variant update for variant {variant.id}')
+                else:
+                    _logger.error(f"Failed to update variant values: {str(e)}")
                 
         # Ensure external IDs are created
         self._create_template_external_ids(variant.product_tmpl_id, values)
@@ -787,7 +815,10 @@ class ImportVariant(models.TransientModel):
                 variant.write(update_vals)
                 _logger.info(f"Successfully updated variant with values: {update_vals}")
             except Exception as e:
-                _logger.error(f"Failed to update variant values: {str(e)}")
+                if 'duplicate key value violates unique constraint' in str(e):
+                    _logger.info(f'Skipping duplicate variant update for variant {variant.id}')
+                else:
+                    _logger.error(f"Failed to update variant values: {str(e)}")
                 
         # Ensure external IDs are created
         self._create_template_external_ids(variant.product_tmpl_id, values)
@@ -1055,12 +1086,27 @@ class ImportVariant(models.TransientModel):
             variant = ProductProduct.search(domain, limit=1)
             
             if not variant:
-                _logger.info(f"Creating new variant for template {template.name}")
-                variant = ProductProduct.create({
-                    'product_tmpl_id': template.id,
-                    'default_code': values.get('Internal Reference'),
-                    'barcode': values.get('Barcode'),
-                })
+                try:
+                    variant = ProductProduct.create({
+                        'product_tmpl_id': template.id,
+                        'default_code': values.get('Internal Reference'),
+                        'barcode': values.get('Barcode'),
+                    })
+                except Exception as e:
+                    if 'duplicate key value violates unique constraint' in str(e):
+                        _logger.info(f'Skipping duplicate variant creation for template {template.id}')
+                        # Try to get the existing variant one last time
+                        existing_variants = self.env['product.product'].search([
+                            ('product_tmpl_id', '=', template.id),
+                            ('default_code', '=', values.get('Internal Reference')),
+                            ('barcode', '=', values.get('Barcode')),
+                        ], limit=1)
+                        if existing_variants:
+                            variant = existing_variants[0]
+                        return variant  # Return whatever we found or False
+                    else:
+                        _logger.error(f'Error creating variant: {str(e)}')
+                        return False
             
             # Update variant values
             variant.write({
