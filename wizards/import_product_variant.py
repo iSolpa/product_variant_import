@@ -20,13 +20,9 @@
 #    If not, see <http://www.gnu.org/licenses/>.
 #
 #############################################################################
-import base64
-import csv
-import io
 import logging
-import requests
-from datetime import datetime
-import binascii, tempfile, xlrd
+import os
+import base64, binascii, csv, io, tempfile, requests, xlrd
 from odoo import fields, models, _
 from odoo.exceptions import UserError
 from odoo.tools import float_compare
@@ -36,7 +32,6 @@ import itertools
 import psycopg2
 from odoo import api
 from odoo.modules.registry import Registry
-import re
 
 _logger = logging.getLogger(__name__)
 
@@ -47,7 +42,7 @@ class ImportVariant(models.TransientModel):
 
     import_file = fields.Selection(
         [('csv', 'CSV File'), ('excel', 'Excel File')], required=True,
-        string="Import File", help="Import the file")
+        string="Import File", help="Import the files")
     method = fields.Selection([('create', 'Create Product'),
                              ('update', 'Update Product'),
                              ('update_product', 'Update Product Variant')],
@@ -77,8 +72,6 @@ class ImportVariant(models.TransientModel):
             batch_rows = rows[batch_start:batch_end]
             batch_number = batch_start // batch_size + 1
             _logger.info(f"Processing batch {batch_number}: Rows {batch_start+1} to {batch_end}")
-        
-            # Process rows in batch
             self._process_batch_rows(batch_rows)
             _logger.info(f"Completed processing batch {batch_number}")
 
@@ -274,325 +267,319 @@ class ImportVariant(models.TransientModel):
         return not bool(existing_product), existing_product
 
     def _process_csv_rows(self, rows, column_map):
-        """Process data rows from the CSV file."""
-        _logger.info("Starting to process CSV rows")
-        
+        """Process CSV rows."""
         # Validate required columns
         required_columns = ['Name', 'Category']
         missing_columns = [col for col in required_columns if col not in column_map]
         if missing_columns:
             raise UserError(_("Missing required columns: %s") % ", ".join(missing_columns))
         
-        # Pre-process templates to avoid duplicates
-        template_references = set()
-        for row in rows:
-            template_ref_index = column_map.get('Template Internal Reference') or column_map.get('Internal Reference')
-            if template_ref_index is not None and template_ref_index < len(row):
-                template_ref = row[template_ref_index]
-                template_references.add(template_ref)
-        
-        _logger.info(f"Total unique template references: {len(template_references)}")
-        
-        # Find existing templates
-        existing_templates = {}
-        ProductTemplate = self.env['product.template']
-        for template_ref in template_references:
-            template = ProductTemplate.search([('default_code', '=', template_ref)], limit=1)
-            if template:
-                _logger.info(f"Found existing template for reference: {template_ref}. ID: {template.id}, Name: {template.name}")
-                existing_templates[template_ref] = template
-        
-        _logger.info(f"Found {len(existing_templates)} existing templates")
-        
-        # Create missing templates
-        new_templates = {}
-        for template_ref in template_references:
-            if template_ref not in existing_templates:
-                # Find the product_values_list for this template_ref
-                product_values_list = []
-                for row in rows:
-                    template_ref_index = column_map.get('Template Internal Reference') or column_map.get('Internal Reference')
-                    if template_ref_index is not None and template_ref_index < len(row):
-                        if row[template_ref_index] == template_ref:
-                            product_values_list.append(row)
-        
-                if product_values_list:
-                    # Create a dictionary from the list for _create_product_template
-                    template_values = {}
-                    for col, index in column_map.items():
-                        if index < len(product_values_list[0]):
-                            template_values[col] = product_values_list[0][index]
-                    template = self._create_product_template(template_values)
-                    if template:
-                        new_templates[template_ref] = template
-                        _logger.info(f"Created new template for reference: {template_ref}. ID: {template.id}, Name: {template.name}")
-                    else:
-                        _logger.error(f"Failed to create template for reference: {template_ref}")
-                else:
-                    _logger.warning(f"No product values found for template reference: {template_ref}")
-        
-        _logger.info(f"Created {len(new_templates)} new templates")
-        
-        # Combine existing and new templates
-        all_templates = existing_templates.copy()
-        all_templates.update(new_templates)
-        
-        _logger.info(f"Total templates (existing + new): {len(all_templates)}")
-        
-        # Process product data in batches
         # Collect rows into batches based on product templates
-        products = {}
-        for row in rows:
-            template_ref_index = column_map.get('Template Internal Reference') or column_map.get('Internal Reference')
-            if template_ref_index is not None and template_ref_index < len(row):
-                template_ref = row[template_ref_index]
-            else:
-                template_ref = 'No Template' # Group products without template
-            if template_ref not in products:
-                products[template_ref] = []
-            products[template_ref].append(row)
+        batch_size = 50  # Adjust as needed
+        total_rows = len(rows)
+        _logger.info(f"Total rows to process: {total_rows}")
+        # Collect all rows first
+        product_data_list = []
+        for row_num, row in enumerate(rows, start=2):
+            valid, error_msg = fp.validate_row_data(row, len(column_map), row_num, required_columns)
+            if not valid:
+                _logger.warning(error_msg)
+                continue
+            
+            values = {col: fp.process_cell_value(row[idx]) for col, idx in column_map.items() if idx < len(row)}
+            product_data_list.append(values)
         
-        total_products = len(products)
+        # Group product data by product templates
+        products_map = {}  # group_key -> [values]
+        for values in product_data_list:
+            group_key = values.get('Unique Identifier') or values.get('Name')
+            if not group_key:
+                _logger.warning(f"Skipping row: No Unique Identifier or Name found")
+                continue
+            if group_key not in products_map:
+                products_map[group_key] = []
+            products_map[group_key].append(values)
         
+        # Now process products in batches
+        product_keys = list(products_map.keys())
+        total_products = len(product_keys)
         _logger.info(f"Total products to process: {total_products}")
+        for batch_start in range(0, total_products, batch_size):
+            batch_end = min(batch_start + batch_size, total_products)
+            batch_product_keys = product_keys[batch_start:batch_end]
+            batch_number = batch_start // batch_size + 1
+            _logger.info(f"Processing batch {batch_number}: Products {batch_start+1} to {batch_end}")
+            for group_key in batch_product_keys:
+                product_values_list = products_map[group_key]
+                self._process_product_template(group_key, product_values_list)
+            _logger.info(f"Completed processing batch {batch_number}")
+        _logger.info("Finished processing all batches")
+
+    def _process_product_template(self, group_key, product_values_list):
+        """Process a single product template and its variants following the defined flow:
+        1. Check if we need to skip records based on method
+        2. Search for template by external ID, internal reference, or barcode
+        3. Create template if it doesn't exist
+        4. Create template variants
+        5. Store database IDs for later use
+        6. Create external IDs for template and variants
+        """
+        _logger.info(f"Processing template with barcode: {group_key}")
+        first_row = product_values_list[0]
+        _logger.info(f"For template [{first_row.get('Template Unique Identifier')}] {first_row.get('Name')}")
         
-        batch_size = 50
-        product_count = 0
-        for i, group_key in enumerate(products):
-            product_values_list = products[group_key]
-            start = i * batch_size + 1
-            end = min((i + 1) * batch_size, total_products)
-            _logger.info(f"Processing batch {i + 1}: Products {start} to {end}")
+        # Step 1: Check if we should skip based on method
+        if self.method == 'create':
+            existing_template = self._find_existing_template(product_values_list[0])
+            if existing_template:
+                _logger.info(f"Skipping existing template in create mode: {group_key}")
+                return
         
-            # Retrieve the template from the dictionary
-            if group_key != 'No Template':
-                product_tmpl = all_templates.get(group_key)
-                if not product_tmpl:
-                    _logger.error(f"No template found for reference: {group_key}")
-                    continue
-            else:
-                product_tmpl = False
+        # Step 2: Search for existing template
+        template_values = product_values_list[0].copy()
+        # Get template identifier
+        template_identifier = template_values.get('Template Internal Reference') or template_values.get('Internal Reference')
+        _logger.info(f"Template identifier from CSV: {template_identifier}")
+        template_ref = template_values.get('Template Internal Reference') or template_values.get('Internal Reference')
+        _logger.info(f"Template reference from CSV: {template_ref}")
+        product_tmpl = self._find_existing_template(template_values)
         
-            # Process variants for the template
-            processed_count = 0
-            for row in product_values_list:
-                # Create a dictionary from the list for _create_or_update_variant
-                variant_values = {}
-                for col, index in column_map.items():
-                    if index < len(row):
-                        variant_values[col] = row[index]
-                if product_tmpl:
-                    variant = self._create_or_update_variant(product_tmpl, variant_values)
-                    if variant:
-                        processed_count += 1
-                else:
-                    # Create template on the fly if no template is defined
-                    template_values = {}
-                    for col, index in column_map.items():
-                        if index < len(row):
-                            template_values[col] = row[index]
-                    template = self._create_product_template(template_values)
-                    if template:
-                        variant = self._create_or_update_variant(template, template_values)
-                        if variant:
-                            processed_count += 1
-            _logger.info(f"=== Completed template processing. Processed {processed_count} variants ===")
+        # Step 3: Create template if it doesn't exist
+        if not product_tmpl:
+            if self.method == 'update':
+                _logger.info(f"Template not found in update mode: {group_key}")
+                return
+            product_tmpl = self._create_product_template(template_values)
+        
+        # Check if this is a product without variants
+        has_variants = any(
+            values.get('Variant Attributes') and values.get('Attribute Values')
+            for values in product_values_list
+        )
+        
+        if not has_variants:
+            # Handle single product without variants
+            self._update_product_without_variants(product_tmpl, template_values)
+            return product_tmpl
+        
+        # Step 4 & 5: Process variants and store their IDs
+        processed_variants = self._process_variants(product_tmpl, product_values_list)
+        
+        # Step 6: Create external IDs for template
+        self._create_template_external_ids(product_tmpl, template_values)
+        
+        return product_tmpl
+
+    def _update_product_without_variants(self, product_tmpl, values):
+        """Handle a product that doesn't have variants"""
+        _logger.info(f"Processing template without variants: {product_tmpl.name}")
+        
+        # Get the single variant
+        variant = product_tmpl.product_variant_ids[0] if product_tmpl.product_variant_ids else False
+        
+        if not variant:
+            # Create the variant if it doesn't exist
+            variant = self.env['product.product'].create({
+                'product_tmpl_id': product_tmpl.id,
+                'active': True
+            })
+        
+        # Update variant values
+        update_vals = {}
+        
+        # Handle internal reference
+        if values.get('Internal Reference'):
+            if not self.env['product.product'].search_count([
+                ('default_code', '=', values['Internal Reference']),
+                ('id', '!=', variant.id)
+            ]):
+                update_vals['default_code'] = values['Internal Reference']
+        
+        # Handle barcode
+        if values.get('Barcode'):
+            if not self.env['product.product'].search_count([
+                ('barcode', '=', values['Barcode']),
+                ('id', '!=', variant.id)
+            ]):
+                update_vals['barcode'] = values['Barcode']
+        
+        # Handle cost
+        if values.get('Cost'):
+            try:
+                update_vals['standard_price'] = float(values['Cost'])
+            except (ValueError, TypeError):
+                _logger.warning(f"Invalid cost value: {values['Cost']}")
+        
+        if update_vals:
+            try:
+                variant.write(update_vals)
+                _logger.info(f"Updated product values: {update_vals}")
+            except Exception as e:
+                _logger.error(f"Failed to update product values: {str(e)}")
+        
+        # Create external IDs
+        self._create_template_external_ids(product_tmpl, values)
+        self._create_variant_external_ids(variant, values)
 
     def _find_existing_template(self, template_values):
-        """Find existing template by various identifiers."""
-        template_ref = template_values.get('Template Internal Reference') or template_values.get('Internal Reference')
-        if not template_ref:
-            return None
-            
+        """Search for existing template by external ID, internal reference, or barcode"""
         ProductTemplate = self.env['product.template']
         
-        # If we have a reference, ONLY search by that reference
+        # Try finding by external ID first
+        template_ref = template_values.get('Template Internal Reference') or template_values.get('Internal Reference')
         if template_ref:
-            _logger.info(f"Searching template by reference: {template_ref}")
+            external_id = f"product_tmpl_{template_ref.replace(' ', '_').lower()}"
+            _logger.info(f"Searching template by external ID: {external_id}")
+            template = self.env.ref(f'__import__.{external_id}', raise_if_not_found=False)
+            if template:
+                _logger.info(f"Found template by external ID. ID: {template.id}, Name: {template.name}")
+                return template
+        
+        # Try finding by internal reference
+        if template_ref:
+            _logger.info(f"Searching template by default_code: {template_ref}")
             template = ProductTemplate.search([('default_code', '=', template_ref)], limit=1)
             if template:
-                _logger.info(f"Found template by reference. ID: {template.id}, Name: {template.name}")
+                _logger.info(f"Found template by default_code. ID: {template.id}, Name: {template.name}")
                 return template
             else:
-                _logger.info(f"No template found with reference: {template_ref}")
-                return None
+                _logger.info(f"No template found with default_code: {template_ref}")
         
-        # Only fall back to barcode/name matching if no reference was provided
-        # Try finding by barcode first
-        barcode = template_values.get('Barcode')
+        # Try finding by barcode
+        barcode = template_values.get('Barcode', '').strip()
         if barcode:
-            _logger.info(f"No reference provided. Searching template by barcode: {barcode}")
+            _logger.info(f"Searching template by barcode: {barcode}")
             template = ProductTemplate.search([('barcode', '=', barcode)], limit=1)
             if template:
                 _logger.info(f"Found template by barcode. ID: {template.id}, Name: {template.name}")
                 return template
-                
-        # Try finding by name as last resort
-        name = template_values.get('Name')
-        if name:
-            _logger.info(f"No reference or barcode match. Searching template by name: {name}")
-            template = ProductTemplate.search([('name', '=', name)], limit=1)
-            if template:
-                _logger.info(f"Found template by name. ID: {template.id}, Name: {template.name}")
-                return template
-                
-        return None
+            else:
+                _logger.info(f"No template found with barcode: {barcode}")
+        
+        _logger.warning("No template found by any method")
+        return False
+
+    def _create_product_template(self, template_values):
+        """Create a new product template"""
+        vals = self._prepare_template_values(template_values)
+        return self.env['product.template'].create(vals)
+
+    def _process_variants(self, product_tmpl, product_values_list):
+        """Process variants for a product template"""
+        processed_variants = []
+        
+        # First, prepare attribute lines
+        self._prepare_attribute_lines(product_tmpl, product_values_list)
+        
+        # Process each variant in the import data
+        for values in product_values_list:
+            variant = self._create_or_update_variant(product_tmpl, values)
+            if variant:
+                processed_variants.append({
+                    'variant': variant,
+                    'values': values
+                })
+        
+        return processed_variants
 
     def _find_variant_by_combination(self, product_tmpl, values):
         """Find variant by its attribute combination"""
-        _logger.info(f"Finding variant by combination for template {product_tmpl.name}")
+        if not (values.get('Variant Attributes') and values.get('Attribute Values')):
+            return False
         
-        # Get all possible variants
+        attribute_names = [name.strip() for name in values['Variant Attributes'].split(',')]
+        attribute_values = [value.strip() for value in values['Attribute Values'].split(';')]
+        
+        if len(attribute_names) != len(attribute_values):
+            _logger.warning(f"Mismatch in attribute counts for {product_tmpl.name}")
+            return False
+
+        # Lock the product template to prevent concurrent variant creation
+        self.env.cr.execute("""
+            SELECT id FROM product_template 
+            WHERE id = %s 
+            FOR UPDATE NOWAIT
+        """, (product_tmpl.id,))
+        
+        # Get all product variants with a fresh query
         variants = self.env['product.product'].search([
             ('product_tmpl_id', '=', product_tmpl.id)
         ])
         
-        if not variants:
-            _logger.info("No variants found for template")
-            return False
-            
-        # Extract attribute values from the import data
-        import_attr_values = []
-        for attr in product_tmpl.attribute_line_ids:
-            attr_name = attr.attribute_id.name
-            attr_value = values.get(attr_name)
-            if not attr_value:
-                _logger.warning(f"Missing value for attribute {attr_name}")
-                continue
-            import_attr_values.append(attr_value.strip())
-            
-        if not import_attr_values:
-            _logger.warning("No attribute values found in import data")
-            return False
-            
-        # Sort both lists for consistent comparison
-        import_attr_values = sorted(import_attr_values)
-        
-        # Find matching variant
+        # Create a set of attribute value combinations for faster lookup
+        variant_combinations = {}
         for variant in variants:
-            variant_attr_values = []
-            for value in variant.product_template_attribute_value_ids:
-                variant_attr_values.append(value.product_attribute_value_id.name)
-            variant_attr_values = sorted(variant_attr_values)
+            key_parts = []
+            for attr_name in attribute_names:
+                attr_value = variant.product_template_attribute_value_ids.filtered(
+                    lambda x: x.attribute_id.name == attr_name
+                ).product_attribute_value_id.name
+                if attr_value:
+                    key_parts.append((attr_name, attr_value))
+            if key_parts:
+                variant_combinations[tuple(sorted(key_parts))] = variant
+
+        # Create key for the current combination
+        current_combination = tuple(sorted(zip(attribute_names, attribute_values)))
+        
+        # Look for exact match
+        matching_variant = variant_combinations.get(current_combination)
+        if matching_variant:
+            _logger.info(f"Found matching variant for combination: {values['Attribute Values']}")
+            return matching_variant
             
-            if import_attr_values == variant_attr_values:
-                _logger.info(f"Found matching variant with combination: {', '.join(variant_attr_values)}")
-                return variant
-                
-        _logger.info(f"No matching variant found for combination: {', '.join(import_attr_values)}")
+        _logger.info(f"No matching variant found for combination: {values['Attribute Values']}")
         return False
 
     def _create_or_update_variant(self, product_tmpl, values):
         """Create or update a product variant"""
-        try:
-            variant = False
-            if values.get('Variant Attributes') and values.get('Attribute Values'):
-                attributes = values['Variant Attributes'].split(',')
-                value_names = values['Attribute Values'].split(';')
-                
-                # Create a dict of attribute_id: value_id pairs
-                value_pairs = []
-                for attr_name, value_name in zip(attributes, value_names):
-                    attribute = self.env['product.attribute'].search([('name', '=', attr_name.strip())], limit=1)
-                    if not attribute:
-                        continue
-                        
-                    value = self.env['product.attribute.value'].search([
-                        ('name', '=', value_name.strip()),
-                        ('attribute_id', '=', attribute.id)
-                    ], limit=1)
-                    
-                    if value:
-                        value_pairs.append((attribute.id, value.id))
-                        
-                # Find variant by attribute value combination
-                domain = [('product_tmpl_id', '=', product_tmpl.id)]
-                for attr_id, value_id in value_pairs:
-                    domain.append(('product_template_attribute_value_ids.product_attribute_value_id', '=', value_id))
-                    
-                variant = self.env['product.product'].search(domain, limit=1)
-                
-                if not variant:
-                    try:
-                        variant = self.env['product.product'].create({
-                            'product_tmpl_id': product_tmpl.id,
-                            'default_code': values.get('Internal Reference'),
-                            'barcode': values.get('Barcode'),
-                        })
-                    except Exception as e:
-                        if 'duplicate key value violates unique constraint' in str(e):
-                            _logger.info(f'Skipping duplicate variant creation for template {product_tmpl.id}')
-                            # Try to get the existing variant one last time
-                            existing_variants = self.env['product.product'].search([
-                                ('product_tmpl_id', '=', product_tmpl.id),
-                                ('default_code', '=', values.get('Internal Reference')),
-                                ('barcode', '=', values.get('Barcode')),
-                            ], limit=1)
-                            if existing_variants:
-                                variant = existing_variants[0]
-                            return variant  # Return whatever we found or False
-                        else:
-                            _logger.error(f'Error creating variant: {str(e)}')
-                            return False
-            
-            # Update variant values
-            update_vals = {}
-            
-            # Handle internal reference
-            internal_ref = values.get('Internal Reference', '').strip()
-            if internal_ref:
-                existing_product = self.env['product.product'].search([
-                    ('default_code', '=', internal_ref),
-                    ('id', '!=', variant.id)
-                ], limit=1)
-                if not existing_product:
-                    update_vals['default_code'] = internal_ref
-                    _logger.info(f"Setting internal reference {internal_ref} for variant")
-            
-            # Handle barcode
-            barcode = values.get('Barcode', '').strip()
-            if barcode:
-                existing_product = self.env['product.product'].search([
-                    ('barcode', '=', barcode),
-                    ('id', '!=', variant.id)
-                ], limit=1)
-                if not existing_product:
-                    update_vals['barcode'] = barcode
-                    _logger.info(f"Setting barcode {barcode} for variant")
-            
-            # Handle cost
-            if values.get('Cost'):
-                try:
-                    cost_value = float(values['Cost'])
-                    update_vals['standard_price'] = cost_value
-                    _logger.info(f"Setting cost price to {cost_value} for variant with combination {values.get('Variant Attributes')}")
-                except (ValueError, TypeError):
-                    _logger.warning(f"Invalid cost value: {values['Cost']}")
-            
-            # Handle attribute values
-            if values.get('Variant Attributes') and values.get('Attribute Values'):
+        _logger.info(f"Creating or updating variant for {product_tmpl.name}")
+        
+        # Lock at transaction level to prevent concurrent variant creation
+        self.env.cr.execute("SELECT id FROM product_template WHERE id = %s FOR UPDATE", (product_tmpl.id,))
+        
+        # Refresh the product template from database to ensure we have latest data
+        product_tmpl.flush_recordset()  # Flush any pending changes
+        product_tmpl.invalidate_recordset()  # Invalidate cache in Odoo 17
+        product_tmpl = self.env['product.template'].browse(product_tmpl.id)
+        
+        # First try to find the variant by combination
+        variant = self._find_variant_by_combination(product_tmpl, values)
+        
+        if not variant and values.get('Internal Reference'):
+            variant = self._find_existing_variant_by_default_code(product_tmpl, values)
+        
+        if not variant and values.get('Barcode'):
+            variant = self.env['product.product'].search([
+                ('barcode', '=', values['Barcode']),
+                ('product_tmpl_id', '=', product_tmpl.id)
+            ], limit=1)
+
+        # If no variant found and we have attribute values, try to create one
+        if not variant and values.get('Variant Attributes') and values.get('Attribute Values'):
+            try:
                 attribute_names = [name.strip() for name in values['Variant Attributes'].split(',')]
                 attribute_values = [value.strip() for value in values['Attribute Values'].split(';')]
                 
                 if len(attribute_names) != len(attribute_values):
-                    _logger.warning(f"Mismatch in attribute counts for {variant.product_tmpl_id.name}")
+                    _logger.warning(f"Mismatch in attribute counts for {product_tmpl.name}")
                     return False
 
-                # Get all product template attribute lines
-                template_attribute_lines = variant.product_tmpl_id.attribute_line_ids
-
-                # Collect attribute value IDs in the order they appear in the template
-                attribute_value_ids = []
+                # Get all product template attribute lines with a fresh query
+                template_attribute_lines = self.env['product.template.attribute.line'].search([
+                    ('product_tmpl_id', '=', product_tmpl.id)
+                ])
+                
+                # Build the attribute value combination
+                value_combination = []
                 for attr_name, attr_value in zip(attribute_names, attribute_values):
-                    # Find the attribute line for this attribute
                     attr_line = template_attribute_lines.filtered(
                         lambda l: l.attribute_id.name == attr_name
                     )
                     if not attr_line:
-                        _logger.warning(f"Attribute {attr_name} not found in template {variant.product_tmpl_id.name}")
+                        _logger.warning(f"Attribute {attr_name} not found in template {product_tmpl.name}")
                         continue
 
-                    # Find the attribute value
                     attr_value_id = attr_line.value_ids.filtered(
                         lambda v: v.name == attr_value
                     )
@@ -600,37 +587,131 @@ class ImportVariant(models.TransientModel):
                         _logger.warning(f"Value {attr_value} not found for attribute {attr_name}")
                         continue
 
-                    # Get the product template attribute value
                     ptav = self.env['product.template.attribute.value'].search([
-                        ('product_tmpl_id', '=', variant.product_tmpl_id.id),
+                        ('product_tmpl_id', '=', product_tmpl.id),
                         ('product_attribute_value_id', '=', attr_value_id.id)
                     ], limit=1)
                     
                     if ptav:
-                        attribute_value_ids.append(ptav.id)
+                        value_combination.append(ptav.id)
 
-                if attribute_value_ids:
-                    update_vals['product_template_attribute_value_ids'] = [(6, 0, attribute_value_ids)]
-                    _logger.info(f"Setting attribute values for variant: {attribute_value_ids}")
-
-            if update_vals:
-                try:
-                    variant.write(update_vals)
-                    _logger.info(f"Successfully updated variant with values: {update_vals}")
-                except Exception as e:
-                    if 'duplicate key value violates unique constraint' in str(e):
-                        _logger.info(f'Skipping duplicate variant update for variant {variant.id}')
+                if value_combination:
+                    # Ensure we have the latest state before creating variant
+                    self.env.cr.commit()  # Commit current transaction
+                    
+                    # Use Odoo's native variant creation mechanism in a new transaction
+                    variant = product_tmpl.with_context(create_product_product=True)._create_product_variant(
+                        product_template_attribute_value_ids=value_combination
+                    )
+                    
+                    if variant:
+                        _logger.info(f"Created new variant for {product_tmpl.name}")
                     else:
-                        _logger.error(f"Failed to update variant values: {str(e)}")
-                
-            # Ensure external IDs are created
-            self._create_template_external_ids(variant.product_tmpl_id, values)
-            self._create_variant_external_ids(variant, values)
-            return variant
+                        _logger.warning(f"Failed to create variant for {product_tmpl.name}")
+                        return False
 
-        except Exception as e:
-            _logger.error(f'Top-level error in _create_or_update_variant: {str(e)}')
+            except Exception as e:
+                _logger.error(f"Failed to create variant: {str(e)}")
+                return False
+
+        if not variant:
+            _logger.warning(f"Could not find or create variant for {product_tmpl.name}")
             return False
+
+        # Update variant values
+        update_vals = {}
+        
+        # Handle internal reference
+        internal_ref = values.get('Internal Reference', '').strip()
+        if internal_ref:
+            existing_product = self.env['product.product'].search([
+                ('default_code', '=', internal_ref),
+                ('id', '!=', variant.id)
+            ], limit=1)
+            if not existing_product:
+                update_vals['default_code'] = internal_ref
+                _logger.info(f"Setting internal reference {internal_ref} for variant")
+        
+        # Handle barcode
+        barcode = values.get('Barcode', '').strip()
+        if barcode:
+            existing_product = self.env['product.product'].search([
+                ('barcode', '=', barcode),
+                ('id', '!=', variant.id)
+            ], limit=1)
+            if not existing_product:
+                update_vals['barcode'] = barcode
+                _logger.info(f"Setting barcode {barcode} for variant")
+        
+        # Handle cost
+        if values.get('Cost'):
+            try:
+                cost_value = float(values['Cost'])
+                update_vals['standard_price'] = cost_value
+                _logger.info(f"Setting cost price to {cost_value} for variant with combination {values.get('Variant Attributes')}")
+            except (ValueError, TypeError):
+                _logger.warning(f"Invalid cost value: {values['Cost']}")
+        
+        # Handle quantity from either column name
+        qty_value = values.get('Qty On Hand', values.get('Quantity', ''))
+        if qty_value.strip() if isinstance(qty_value, str) else qty_value:
+            vals['qty_available'] = float(qty_value or '0.0')
+
+        # Handle attribute values
+        if values.get('Variant Attributes') and values.get('Attribute Values'):
+            attribute_names = [name.strip() for name in values['Variant Attributes'].split(',')]
+            attribute_values = [value.strip() for value in values['Attribute Values'].split(';')]
+            
+            if len(attribute_names) != len(attribute_values):
+                _logger.warning(f"Mismatch in attribute counts for {product_tmpl.name}")
+                return False
+
+            # Get all product template attribute lines
+            template_attribute_lines = product_tmpl.attribute_line_ids
+
+            # Collect attribute value IDs in the order they appear in the template
+            attribute_value_ids = []
+            for attr_name, attr_value in zip(attribute_names, attribute_values):
+                # Find the attribute line for this attribute
+                attr_line = template_attribute_lines.filtered(
+                    lambda l: l.attribute_id.name == attr_name
+                )
+                if not attr_line:
+                    _logger.warning(f"Attribute {attr_name} not found in template {product_tmpl.name}")
+                    continue
+
+                # Find the attribute value
+                attr_value_id = attr_line.value_ids.filtered(
+                    lambda v: v.name == attr_value
+                )
+                if not attr_value_id:
+                    _logger.warning(f"Value {attr_value} not found for attribute {attr_name}")
+                    continue
+
+                # Get the product template attribute value
+                ptav = self.env['product.template.attribute.value'].search([
+                    ('product_tmpl_id', '=', product_tmpl.id),
+                    ('product_attribute_value_id', '=', attr_value_id.id)
+                ], limit=1)
+                
+                if ptav:
+                    attribute_value_ids.append(ptav.id)
+
+            if attribute_value_ids:
+                update_vals['product_template_attribute_value_ids'] = [(6, 0, attribute_value_ids)]
+                _logger.info(f"Setting attribute values for variant: {attribute_value_ids}")
+
+        if update_vals:
+            try:
+                variant.write(update_vals)
+                _logger.info(f"Successfully updated variant with values: {update_vals}")
+            except Exception as e:
+                _logger.error(f"Failed to update variant values: {str(e)}")
+                
+        # Ensure external IDs are created
+        self._create_template_external_ids(variant.product_tmpl_id, values)
+        self._create_variant_external_ids(variant, values)
+        return variant
 
     def _update_variant_identifiers(self, variant, values):
         """Update variant identifiers and cost"""
@@ -667,59 +748,12 @@ class ImportVariant(models.TransientModel):
             except (ValueError, TypeError):
                 _logger.warning(f"Invalid cost value: {values['Cost']}")
         
-        # Handle attribute values
-        if values.get('Variant Attributes') and values.get('Attribute Values'):
-            attribute_names = [name.strip() for name in values['Variant Attributes'].split(',')]
-            attribute_values = [value.strip() for value in values['Attribute Values'].split(';')]
-            
-            if len(attribute_names) != len(attribute_values):
-                _logger.warning(f"Mismatch in attribute counts for {variant.product_tmpl_id.name}")
-                return False
-
-            # Get all product template attribute lines
-            template_attribute_lines = variant.product_tmpl_id.attribute_line_ids
-
-            # Collect attribute value IDs in the order they appear in the template
-            attribute_value_ids = []
-            for attr_name, attr_value in zip(attribute_names, attribute_values):
-                # Find the attribute line for this attribute
-                attr_line = template_attribute_lines.filtered(
-                    lambda l: l.attribute_id.name == attr_name
-                )
-                if not attr_line:
-                    _logger.warning(f"Attribute {attr_name} not found in template {variant.product_tmpl_id.name}")
-                    continue
-
-                # Find the attribute value
-                attr_value_id = attr_line.value_ids.filtered(
-                    lambda v: v.name == attr_value
-                )
-                if not attr_value_id:
-                    _logger.warning(f"Value {attr_value} not found for attribute {attr_name}")
-                    continue
-
-                # Get the product template attribute value
-                ptav = self.env['product.template.attribute.value'].search([
-                    ('product_tmpl_id', '=', variant.product_tmpl_id.id),
-                    ('product_attribute_value_id', '=', attr_value_id.id)
-                ], limit=1)
-                
-                if ptav:
-                    attribute_value_ids.append(ptav.id)
-
-            if attribute_value_ids:
-                update_vals['product_template_attribute_value_ids'] = [(6, 0, attribute_value_ids)]
-                _logger.info(f"Setting attribute values for variant: {attribute_value_ids}")
-
         if update_vals:
             try:
                 variant.write(update_vals)
                 _logger.info(f"Successfully updated variant with values: {update_vals}")
             except Exception as e:
-                if 'duplicate key value violates unique constraint' in str(e):
-                    _logger.info(f'Skipping duplicate variant update for variant {variant.id}')
-                else:
-                    _logger.error(f"Failed to update variant values: {str(e)}")
+                _logger.error(f"Failed to update variant values: {str(e)}")
                 
         # Ensure external IDs are created
         self._create_template_external_ids(variant.product_tmpl_id, values)
@@ -741,282 +775,208 @@ class ImportVariant(models.TransientModel):
             self._create_external_id(variant, external_id)
 
     def _create_external_id(self, record, external_id):
-        """Create external ID for a record, handling duplicates gracefully"""
-        if not record or not external_id:
-            return False
-            
-        IrModelData = self.env['ir.model.data']
-        
-        # Clean the external_id to be XML-ID compatible
-        clean_external_id = re.sub(r'[^a-zA-Z0-9_]', '_', external_id.lower())
-        
-        # Check if external ID already exists
-        existing = IrModelData.search([
+        """Create external ID for a record"""
+        if not self.env['ir.model.data'].search([
             ('model', '=', record._name),
             ('res_id', '=', record.id)
-        ], limit=1)
-        
-        if existing:
-            # Update existing record if needed
-            if existing.name != clean_external_id:
-                try:
-                    existing.write({'name': clean_external_id})
-                except Exception as e:
-                    _logger.warning(f"Could not update external ID: {e}")
-            return existing
-            
-        # Try to create new external ID
-        try:
-            return IrModelData.create({
+        ]):
+            self.env['ir.model.data'].create({
+                'name': external_id,
                 'model': record._name,
                 'res_id': record.id,
-                'module': '__import__',
-                'name': clean_external_id,
+                'module': '__import__'
             })
-        except Exception as e:
-            _logger.warning(f"Could not create external ID: {e}")
-            # If creation fails, try with a unique suffix
-            try:
-                unique_name = f"{clean_external_id}_{record.id}"
-                return IrModelData.create({
-                    'model': record._name,
-                    'res_id': record.id,
-                    'module': '__import__',
-                    'name': unique_name,
-                })
-            except Exception as e:
-                _logger.error(f"Failed to create external ID with unique suffix: {e}")
-                return False
-
-    def _get_category_id(self, category_path):
-        """Get or create product category from path."""
-        if not category_path:
-            return self.env.ref('product.product_category_all').id
-            
-        categories = category_path.split('/')
-        parent_id = None
-        current_id = None
-        
-        for cat_name in categories:
-            cat_name = cat_name.strip()
-            if not cat_name:
-                continue
-                
-            domain = [('name', '=', cat_name)]
-            if parent_id:
-                domain.append(('parent_id', '=', parent_id))
-                
-            category = self.env['product.category'].search(domain, limit=1)
-            if not category:
-                category = self.env['product.category'].create({
-                    'name': cat_name,
-                    'parent_id': parent_id
-                })
-            parent_id = category.id
-            current_id = category.id
-            
-        return current_id or self.env.ref('product.product_category_all').id
 
     def _prepare_template_values(self, template_values):
         """Prepare values for creating a new product template"""
         vals = {
             'name': template_values.get('Name', ''),
-            'default_code': template_values.get('Template Internal Reference') or template_values.get('Internal Reference'),
-            'barcode': template_values.get('Barcode'),
-            'type': 'product',
-            'categ_id': self._get_category_id(template_values.get('Category')),
-            'sale_ok': template_values.get('Canbe Sold', 'TRUE').upper() == 'TRUE',
-            'purchase_ok': template_values.get('Canbe Purchased', 'TRUE').upper() == 'TRUE',
-            'available_in_pos': template_values.get('Available in POS', 'TRUE').upper() == 'TRUE',
+            'default_code': template_values.get('Internal Reference', ''),
+            'sale_ok': template_values.get('Can be sold', 'True').lower() == 'true',
+            'purchase_ok': template_values.get('Can be Purchased', 'True').lower() == 'true',
+            'detailed_type': 'product',
+            'description_sale': template_values.get('Description for customers', ''),
+            'list_price': float(template_values.get('Sales Price', '0.0') or '0.0'),
+            'standard_price': float(template_values.get('Cost', '0.0') or '0.0'),
+            'weight': float(template_values.get('Weight', '0.0') or '0.0'),
+            'volume': float(template_values.get('Volume', '0.0') or '0.0'),
+            'available_in_pos': template_values.get('Available in POS', 'True').lower() == 'true',
         }
-        
-        # Prepare and set attribute lines
-        attr_lines = self._prepare_attribute_lines(template_values, template_values)
-        if attr_lines:
-            vals['attribute_line_ids'] = attr_lines
-            
+
+        # Handle barcode separately to avoid constraint errors
+        barcode = template_values.get('Barcode', '').strip()
+        if barcode:
+            if self.method in ['update', 'update_product']:
+                # In update modes, first check if there's a product with this barcode
+                existing_product = self.env['product.product'].search([('barcode', '=', barcode)], limit=1)
+                if existing_product:
+                    _logger.info(f"Found existing variant. ID: {existing_product.id} with template ID: {existing_product.product_tmpl_id.id}")
+                    # Use the parent template of the found variant
+                    product_tmpl = existing_product.product_tmpl_id
+                    _logger.info(f"Using parent product template found by barcode: {barcode}")
+                else:
+                    _logger.info(f"No existing product found for barcode: {barcode}")
+                vals['barcode'] = barcode
+            else:
+                # In create mode, only set barcode if it's not used
+                if not self.env['product.product'].search_count([('barcode', '=', barcode)]):
+                    vals['barcode'] = barcode
+                else:
+                    _logger.warning(f"Skipping duplicate barcode in create mode: {barcode}")
+
+        # Process image if provided
+        if template_values.get('Image'):
+            image_path = template_values.get('Image')
+            image_data = po.process_image(image_path)
+            if image_data:
+                vals['image_1920'] = image_data
+
+        if template_values.get('POS Category'):
+            pos_category = template_values['POS Category'].strip()
+            if pos_category:
+                categories = pos_category.split('/')
+                parent_id = None
+                pos_category_ids = []
+                for cat in categories:
+                    if cat.strip():
+                        domain = [('name', '=', cat.strip())]
+                        if parent_id:
+                            domain.append(('parent_id', '=', parent_id))
+                        pos_categ = self.env['pos.category'].search(domain, limit=1)
+                        if not pos_categ:
+                            pos_categ = self.env['pos.category'].create({
+                                'name': cat.strip(),
+                                'parent_id': parent_id
+                            })
+                        parent_id = pos_categ.id
+                        pos_category_ids.append(pos_categ.id)
+                if pos_category_ids:
+                    vals['pos_categ_ids'] = [(6, 0, pos_category_ids)]
+
+        # Process category
+        category = template_values.get('Category', '').strip()
+        if category:
+            categories = category.split('/')
+            parent_id = None
+            for cat in categories:
+                if cat.strip():
+                    domain = [('name', '=', cat.strip())]
+                    if parent_id:
+                        domain.append(('parent_id', '=', parent_id))
+                    category_obj = self.env['product.category'].search(domain, limit=1)
+                    if not category_obj:
+                        category_obj = self.env['product.category'].create({
+                            'name': cat.strip(),
+                            'parent_id': parent_id
+                        })
+                    parent_id = category_obj.id
+            if parent_id:
+                vals['categ_id'] = parent_id
+
+        # Process UoM
+        if template_values.get('Unit of Measure'):
+            uom = self.env['uom.uom'].search([('name', 'ilike', template_values['Unit of Measure'])], limit=1)
+            if not uom:
+                raise UserError(_("Unit of Measure '%s' not found") % template_values['Unit of Measure'])
+            vals['uom_id'] = uom.id
+            vals['uom_po_id'] = uom.id  # Set purchase UoM same as default if not specified
+
+        if template_values.get('Purchase Unit of Measure'):
+            po_uom = self.env['uom.uom'].search([('name', 'ilike', template_values['Purchase Unit of Measure'])], limit=1)
+            if not po_uom:
+                raise UserError(_("Purchase Unit of Measure '%s' not found") % template_values['Purchase Unit of Measure'])
+            vals['uom_po_id'] = po_uom.id
+
+        # Process taxes
+        if template_values.get('Customer Taxes'):
+            tax_id = po.process_tax(self.env, template_values['Customer Taxes'], 'sale')
+            if tax_id:
+                vals['taxes_id'] = [(6, 0, [tax_id])]
+
+        if template_values.get('Vendor Taxes'):
+            supplier_tax_id = po.process_tax(self.env, template_values['Vendor Taxes'], 'purchase')
+            if supplier_tax_id:
+                vals['supplier_taxes_id'] = [(6, 0, [supplier_tax_id])]
+
         return vals
 
-    def _prepare_attribute_lines(self, template_values, template):
-        """Prepare attribute lines for product template from import values.
-        Args:
-            template_values (dict): The values from the import file
-            template (product.template): The template record to add attributes to
-        Returns:
-            list: List of attribute line commands to write to the template
-        """
-        if not template_values.get('Variant Attributes') or not template_values.get('Attribute Values'):
-            return []
-            
-        attributes = template_values['Variant Attributes'].split(',')
-        values_list = template_values['Attribute Values'].split(';')
-        
-        if len(attributes) != len(values_list):
-            _logger.warning(f"Mismatch in attribute count ({len(attributes)}) and values count ({len(values_list)})")
-            return []
-            
-        ProductAttribute = self.env['product.attribute']
-        ProductAttributeValue = self.env['product.attribute.value']
-        
-        attr_lines = []
-        for attribute_name, value_name in zip(attributes, values_list):
-            attribute = ProductAttribute.search([('name', '=', attribute_name.strip())], limit=1)
-            if not attribute:
-                _logger.warning(f"Attribute {attribute_name} not found")
-                continue
-                
-            value = ProductAttributeValue.search([
-                ('name', '=', value_name.strip()),
-                ('attribute_id', '=', attribute.id)
-            ], limit=1)
-            
-            if not value:
-                _logger.info(f"Creating attribute value {value_name} for attribute {attribute_name}")
-                value = ProductAttributeValue.create({
-                    'name': value_name.strip(),
-                    'attribute_id': attribute.id
-                })
-                
-            existing_line = template.attribute_line_ids.filtered(
-                lambda l: l.attribute_id == attribute
-            )
-            
-            if existing_line:
-                if value not in existing_line.value_ids:
-                    existing_line.value_ids = [(4, value.id)]
-            else:
-                attr_lines.append((0, 0, {
-                    'attribute_id': attribute.id,
-                    'value_ids': [(4, value.id)]
-                }))
-                
-        return attr_lines
-
-    def _create_product_template(self, template_values):
-        """Create a new product template with the given values."""
-        ProductTemplate = self.env['product.template']
-        
-        # Check one more time with a clean transaction
-        template_ref = template_values.get('Template Internal Reference') or template_values.get('Internal Reference')
-        self.env.cr.commit()  # Commit any pending transactions
-        existing = ProductTemplate.search([('default_code', '=', template_ref)], limit=1)
-        if existing:
-            _logger.info(f"Found template in new transaction. ID: {existing.id}, Name: {existing.name}")
-            return existing
-        
-        # Get category
-        category_id = self._get_category_id(template_values.get('Category'))
-        
+    def _prepare_variant_values(self, product_tmpl, values):
+        """Prepare values for creating a new product variant"""
         vals = {
-            'name': template_values['Name'],
-            'default_code': template_ref,
-            'barcode': template_values.get('Barcode'),
-            'type': 'product',
-            'categ_id': category_id,
-            'sale_ok': template_values.get('Canbe Sold', 'TRUE').upper() == 'TRUE',
-            'purchase_ok': template_values.get('Canbe Purchased', 'TRUE').upper() == 'TRUE',
-            'available_in_pos': template_values.get('Available in POS', 'TRUE').upper() == 'TRUE',
+            'product_tmpl_id': product_tmpl.id,
         }
-        
-        # Process image if provided
-        image_url = template_values.get('Image')
-        if image_url:
-            _logger.info(f"Processing image from URL: {image_url}")
-            try:
-                response = requests.get(image_url, timeout=10)
-                if response.status_code == 200:
-                    image_data = base64.b64encode(response.content)
-                    vals['image_1920'] = image_data.decode('utf-8')
-                    _logger.info(f"Successfully processed image from {image_url}")
-                else:
-                    _logger.warning(f"Failed to fetch image from {image_url}: Status code {response.status_code}")
-            except Exception as e:
-                _logger.warning(f"Error processing image {image_url}: {str(e)}")
-        else:
-            _logger.info("No image URL found in template values")
-            _logger.debug(f"Available fields in template_values: {list(template_values.keys())}")
-        
-        template = ProductTemplate.create(vals)
-        self.env.cr.commit()  # Commit immediately after creation
-        
-        # Double check the template was created
-        template = ProductTemplate.browse(template.id)
-        if not template.exists():
-            _logger.error(f"Failed to create template with reference: {template_ref}")
-            return None
-            
-        _logger.info(f"Successfully created template. ID: {template.id}, Name: {template.name}")
-        
-        # Prepare and set attribute lines
-        attr_lines = self._prepare_attribute_lines(template_values, template)
-        if attr_lines:
-            template.write({'attribute_line_ids': attr_lines})
-            self.env.cr.commit()  # Commit after adding attribute lines
-            
-        return template
 
-    def _create_or_update_variant(self, template, values):
-        """Create or update a product variant."""
-        ProductProduct = self.env['product.product']
-        
-        # Extract attribute values from the import data
+        # Always include internal reference if available
+        internal_ref = values.get('Internal Reference', '').strip()
+        if internal_ref:
+            vals['default_code'] = internal_ref
+        elif values.get('Default Code', '').strip():
+            vals['default_code'] = values.get('Default Code').strip()
+
+        # Always include barcode if available
+        barcode = values.get('Barcode', '').strip()
+        if barcode:
+            vals['barcode'] = barcode
+
+        # Handle cost price
+        cost = values.get('Cost', '').strip()
+        if cost:
+            try:
+                vals['standard_price'] = float(cost)
+                _logger.info(f"Setting cost price to {cost} for variant with combination {values.get('Variant Attributes')}")
+            except (ValueError, TypeError) as e:
+                _logger.warning(f"Invalid cost value '{cost}': {str(e)}")
+
+        # Handle quantity from either column name
+        qty_value = values.get('Qty On Hand', values.get('Quantity', ''))
+        if qty_value.strip() if isinstance(qty_value, str) else qty_value:
+            vals['qty_available'] = float(qty_value or '0.0')
+
+        # Handle attribute values
         if values.get('Variant Attributes') and values.get('Attribute Values'):
-            attributes = values['Variant Attributes'].split(',')
-            value_names = values['Attribute Values'].split(';')
+            attribute_names = [name.strip() for name in values['Variant Attributes'].split(',')]
+            attribute_values = [value.strip() for value in values['Attribute Values'].split(';')]
             
-            # Create a dict of attribute_id: value_id pairs
-            value_pairs = []
-            for attr_name, value_name in zip(attributes, value_names):
-                attribute = self.env['product.attribute'].search([('name', '=', attr_name.strip())], limit=1)
-                if not attribute:
+            if len(attribute_names) != len(attribute_values):
+                _logger.warning(f"Mismatch in attribute counts for {product_tmpl.name}")
+                return False
+
+            # Get all product template attribute lines
+            template_attribute_lines = product_tmpl.attribute_line_ids
+
+            # Collect attribute value IDs in the order they appear in the template
+            attribute_value_ids = []
+            for attr_name, attr_value in zip(attribute_names, attribute_values):
+                # Find the attribute line for this attribute
+                attr_line = template_attribute_lines.filtered(
+                    lambda l: l.attribute_id.name == attr_name
+                )
+                if not attr_line:
+                    _logger.warning(f"Attribute {attr_name} not found in template {product_tmpl.name}")
                     continue
-                    
-                value = self.env['product.attribute.value'].search([
-                    ('name', '=', value_name.strip()),
-                    ('attribute_id', '=', attribute.id)
+
+                # Find the attribute value
+                attr_value_id = attr_line.value_ids.filtered(
+                    lambda v: v.name == attr_value
+                )
+                if not attr_value_id:
+                    _logger.warning(f"Value {attr_value} not found for attribute {attr_name}")
+                    continue
+
+                # Get the product template attribute value
+                ptav = self.env['product.template.attribute.value'].search([
+                    ('product_tmpl_id', '=', product_tmpl.id),
+                    ('product_attribute_value_id', '=', attr_value_id.id)
                 ], limit=1)
                 
-                if value:
-                    value_pairs.append((attribute.id, value.id))
-                    
-            # Find variant by attribute value combination
-            domain = [('product_tmpl_id', '=', template.id)]
-            for attr_id, value_id in value_pairs:
-                domain.append(('product_template_attribute_value_ids.product_attribute_value_id', '=', value_id))
-                
-            variant = ProductProduct.search(domain, limit=1)
-            
-            if not variant:
-                try:
-                    variant = ProductProduct.create({
-                        'product_tmpl_id': template.id,
-                        'default_code': values.get('Internal Reference'),
-                        'barcode': values.get('Barcode'),
-                    })
-                except Exception as e:
-                    if 'duplicate key value violates unique constraint' in str(e):
-                        _logger.info(f'Skipping duplicate variant creation for template {template.id}')
-                        # Try to get the existing variant one last time
-                        existing_variants = self.env['product.product'].search([
-                            ('product_tmpl_id', '=', template.id),
-                            ('default_code', '=', values.get('Internal Reference')),
-                            ('barcode', '=', values.get('Barcode')),
-                        ], limit=1)
-                        if existing_variants:
-                            variant = existing_variants[0]
-                        return variant  # Return whatever we found or False
-                    else:
-                        _logger.error(f'Error creating variant: {str(e)}')
-                        return False
-            
-            # Update variant values
-            variant.write({
-                'default_code': values.get('Internal Reference'),
-                'barcode': values.get('Barcode'),
-            })
-            
-            return variant
-        return False
+                if ptav:
+                    attribute_value_ids.append(ptav.id)
+
+            if attribute_value_ids:
+                vals['product_template_attribute_value_ids'] = [(6, 0, attribute_value_ids)]
+                _logger.info(f"Setting attribute values for variant: {attribute_value_ids}")
+
+        return vals
 
     def _find_variant_by_default_code(self, product_tmpl, values):
         """Find existing variant by default_code"""
@@ -1079,129 +1039,87 @@ class ImportVariant(models.TransientModel):
         # If no template found, create one
         return self._create_product_template(values)
 
-    def _prepare_attribute_lines(self, values, template):
-        """Prepare attribute lines for product template from import values."""
-        if not values.get('Variant Attributes') or not values.get('Attribute Values'):
-            return []
-            
-        attributes = values['Variant Attributes'].split(',')
-        values_list = values['Attribute Values'].split(';')
-        
-        if len(attributes) != len(values_list):
-            _logger.warning(f"Mismatch in attribute count ({len(attributes)}) and values count ({len(values_list)})")
-            return []
-            
+    def _prepare_attribute_lines(self, product_tmpl, product_values_list):
+        """Prepare attribute lines for the template"""
         ProductAttribute = self.env['product.attribute']
         ProductAttributeValue = self.env['product.attribute.value']
+        ProductTemplateAttributeLine = self.env['product.template.attribute.line']
         
-        attr_lines = []
-        for attribute_name, value_name in zip(attributes, values_list):
-            attribute = ProductAttribute.search([('name', '=', attribute_name.strip())], limit=1)
+        # Get existing attribute lines
+        existing_attr_lines = ProductTemplateAttributeLine.search([
+            ('product_tmpl_id', '=', product_tmpl.id)
+        ])
+        
+        # Collect all attributes and values
+        attribute_value_mapping = {}
+        for values in product_values_list:
+            if values.get('Variant Attributes') and values.get('Attribute Values'):
+                attributes = values['Variant Attributes'].split(',')
+                values_list = values['Attribute Values'].split(';')
+                
+                if len(attributes) != len(values_list):
+                    raise UserError(_(
+                        "Number of attributes ({}) does not match number of values ({}) for product '{}'"
+                    ).format(len(attributes), len(values_list), values.get('Name', '')))
+                
+                for attr_name, attr_value in zip(attributes, values_list):
+                    attr_name = attr_name.strip()
+                    attr_value = attr_value.strip()
+                    if attr_name not in attribute_value_mapping:
+                        attribute_value_mapping[attr_name] = set()
+                    attribute_value_mapping[attr_name].add(attr_value)
+        
+        # Process each attribute
+        for attr_name, attr_values in attribute_value_mapping.items():
+            # Find or create attribute
+            attribute = ProductAttribute.search([('name', '=', attr_name)], limit=1)
             if not attribute:
-                _logger.warning(f"Attribute {attribute_name} not found")
-                continue
-                
-            value = ProductAttributeValue.search([
-                ('name', '=', value_name.strip()),
-                ('attribute_id', '=', attribute.id)
-            ], limit=1)
-            
-            if not value:
-                _logger.info(f"Creating attribute value {value_name} for attribute {attribute_name}")
-                value = ProductAttributeValue.create({
-                    'name': value_name.strip(),
-                    'attribute_id': attribute.id
+                attribute = ProductAttribute.create({
+                    'name': attr_name,
+                    'create_variant': 'always'
                 })
-                
-            existing_line = template.attribute_line_ids.filtered(
-                lambda l: l.attribute_id == attribute
+            
+            # Find or create attribute values
+            value_ids = []
+            for attr_value in attr_values:
+                value = ProductAttributeValue.search([
+                    ('name', '=', attr_value),
+                    ('attribute_id', '=', attribute.id)
+                ], limit=1)
+                if not value:
+                    value = ProductAttributeValue.create({
+                        'name': attr_value,
+                        'attribute_id': attribute.id
+                    })
+                value_ids.append(value.id)
+            
+            # Find existing attribute line
+            attr_line = existing_attr_lines.filtered(
+                lambda l: l.attribute_id.id == attribute.id
             )
             
-            if existing_line:
-                if value not in existing_line.value_ids:
-                    existing_line.value_ids = [(4, value.id)]
+            if attr_line:
+                # Update existing line with new values
+                current_values = attr_line.value_ids.ids
+                new_values = list(set(current_values + value_ids))
+                if new_values != current_values:
+                    try:
+                        attr_line.write({'value_ids': [(6, 0, new_values)]})
+                    except Exception as e:
+                        _logger.warning(
+                            f"Failed to update attribute line for {attr_name}: {str(e)}"
+                        )
             else:
-                attr_lines.append((0, 0, {
-                    'attribute_id': attribute.id,
-                    'value_ids': [(4, value.id)]
-                }))
-                
-        return attr_lines
-
-    def _update_product_template(self, template, template_values):
-        """Update an existing product template with new values."""
-        vals = {
-            'name': template_values['Name'],
-            'default_code': template_values.get('Template Internal Reference') or template_values.get('Internal Reference'),
-            'barcode': template_values.get('Barcode'),
-            'sale_ok': template_values.get('Canbe Sold', 'TRUE').upper() == 'TRUE',
-            'purchase_ok': template_values.get('Canbe Purchased', 'TRUE').upper() == 'TRUE',
-            'available_in_pos': template_values.get('Available in POS', 'TRUE').upper() == 'TRUE',
-        }
+                # Create new attribute line
+                try:
+                    ProductTemplateAttributeLine.create({
+                        'product_tmpl_id': product_tmpl.id,
+                        'attribute_id': attribute.id,
+                        'value_ids': [(6, 0, value_ids)]
+                    })
+                except Exception as e:
+                    _logger.warning(
+                        f"Failed to create attribute line for {attr_name}: {str(e)}"
+                    )
         
-        # Process image if provided
-        image_url = template_values.get('Image')
-        if image_url:
-            _logger.info(f"Processing image from URL: {image_url}")
-            try:
-                response = requests.get(image_url, timeout=10)
-                if response.status_code == 200:
-                    image_data = base64.b64encode(response.content)
-                    vals['image_1920'] = image_data.decode('utf-8')
-                    _logger.info(f"Successfully processed image from {image_url}")
-                else:
-                    _logger.warning(f"Failed to fetch image from {image_url}: Status code {response.status_code}")
-            except Exception as e:
-                _logger.warning(f"Error processing image {image_url}: {str(e)}")
-        else:
-            _logger.info("No image URL found in template values")
-            _logger.debug(f"Available fields in template_values: {list(template_values.keys())}")
-        
-        template.write(vals)
-        
-        # Update attribute lines
-        attr_lines = self._prepare_attribute_lines(template_values, template)
-        if attr_lines:
-            template.write({'attribute_line_ids': attr_lines})
-            
-        return template
-
-    def _find_existing_template(self, template_values):
-        """Find existing template by various identifiers."""
-        template_ref = template_values.get('Template Internal Reference') or template_values.get('Internal Reference')
-        if not template_ref:
-            return None
-            
-        ProductTemplate = self.env['product.template']
-        
-        # If we have a reference, ONLY search by that reference
-        if template_ref:
-            _logger.info(f"Searching template by reference: {template_ref}")
-            template = ProductTemplate.search([('default_code', '=', template_ref)], limit=1)
-            if template:
-                _logger.info(f"Found template by reference. ID: {template.id}, Name: {template.name}")
-                return template
-            else:
-                _logger.info(f"No template found with reference: {template_ref}")
-                return None
-        
-        # Only fall back to barcode/name matching if no reference was provided
-        # Try finding by barcode first
-        barcode = template_values.get('Barcode')
-        if barcode:
-            _logger.info(f"No reference provided. Searching template by barcode: {barcode}")
-            template = ProductTemplate.search([('barcode', '=', barcode)], limit=1)
-            if template:
-                _logger.info(f"Found template by barcode. ID: {template.id}, Name: {template.name}")
-                return template
-                
-        # Try finding by name as last resort
-        name = template_values.get('Name')
-        if name:
-            _logger.info(f"No reference or barcode match. Searching template by name: {name}")
-            template = ProductTemplate.search([('name', '=', name)], limit=1)
-            if template:
-                _logger.info(f"Found template by name. ID: {template.id}, Name: {template.name}")
-                return template
-                
-        return None
+        return True
