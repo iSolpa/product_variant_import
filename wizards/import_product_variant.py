@@ -425,26 +425,30 @@ class ImportVariant(models.TransientModel):
 
     def _create_product_template(self, template_values):
         """Create a new product template"""
-        vals = self._prepare_template_values(template_values)
-        return self.env['product.template'].create(vals)
-
-    def _process_variants(self, product_tmpl, product_values_list):
-        """Process variants for a product template"""
-        processed_variants = []
+        ProductTemplate = self.env['product.template']
         
-        # First, prepare attribute lines
-        self._prepare_attribute_lines(product_tmpl, product_values_list)
+        # Get category
+        category_id = self._get_category_id(template_values.get('Category'))
         
-        # Process each variant in the import data
-        for values in product_values_list:
-            variant = self._create_or_update_variant(product_tmpl, values)
-            if variant:
-                processed_variants.append({
-                    'variant': variant,
-                    'values': values
-                })
+        vals = {
+            'name': template_values['Name'],
+            'default_code': template_values.get('Template Internal Reference') or template_values.get('Internal Reference'),
+            'barcode': template_values.get('Barcode'),
+            'type': 'product',
+            'categ_id': category_id,
+            'sale_ok': template_values.get('Canbe Sold', 'TRUE').upper() == 'TRUE',
+            'purchase_ok': template_values.get('Canbe Purchased', 'TRUE').upper() == 'TRUE',
+            'available_in_pos': template_values.get('Available in POS', 'TRUE').upper() == 'TRUE',
+        }
         
-        return processed_variants
+        template = ProductTemplate.create(vals)
+        
+        # Prepare and set attribute lines
+        attr_lines = self._prepare_attribute_lines(template, template_values)
+        if attr_lines:
+            template.write({'attribute_line_ids': attr_lines})
+            
+        return template
 
     def _find_variant_by_combination(self, product_tmpl, values):
         """Find variant by its attribute combination"""
@@ -781,6 +785,35 @@ class ImportVariant(models.TransientModel):
                 _logger.error(f"Failed to create external ID with unique suffix: {e}")
                 return False
 
+    def _get_category_id(self, category_path):
+        """Get or create product category from path."""
+        if not category_path:
+            return self.env.ref('product.product_category_all').id
+            
+        categories = category_path.split('/')
+        parent_id = None
+        current_id = None
+        
+        for cat_name in categories:
+            cat_name = cat_name.strip()
+            if not cat_name:
+                continue
+                
+            domain = [('name', '=', cat_name)]
+            if parent_id:
+                domain.append(('parent_id', '=', parent_id))
+                
+            category = self.env['product.category'].search(domain, limit=1)
+            if not category:
+                category = self.env['product.category'].create({
+                    'name': cat_name,
+                    'parent_id': parent_id
+                })
+            parent_id = category.id
+            current_id = category.id
+            
+        return current_id or self.env.ref('product.product_category_all').id
+
     def _prepare_template_values(self, template_values):
         """Prepare values for creating a new product template"""
         vals = {
@@ -854,12 +887,15 @@ class ImportVariant(models.TransientModel):
         """Create a new product template with the given values."""
         ProductTemplate = self.env['product.template']
         
+        # Get category
+        category_id = self._get_category_id(template_values.get('Category'))
+        
         vals = {
             'name': template_values['Name'],
             'default_code': template_values.get('Template Internal Reference') or template_values.get('Internal Reference'),
             'barcode': template_values.get('Barcode'),
             'type': 'product',
-            'categ_id': self._get_category_id(template_values.get('Category')),
+            'categ_id': category_id,
             'sale_ok': template_values.get('Canbe Sold', 'TRUE').upper() == 'TRUE',
             'purchase_ok': template_values.get('Canbe Purchased', 'TRUE').upper() == 'TRUE',
             'available_in_pos': template_values.get('Available in POS', 'TRUE').upper() == 'TRUE',
