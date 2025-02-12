@@ -338,20 +338,18 @@ class ImportVariant(models.TransientModel):
         # Step 2: Search for existing template
         template_values = product_values_list[0].copy()
         # Get template identifier
+        def remove_bom(s):
+            return s.encode('utf-8').decode('utf-8-sig')
+        
         raw_tui = None
+        target_key = 'Template Unique Identifier'
         for key in template_values:
-            if key.strip() == 'Template Unique Identifier':
+            if remove_bom(key) == target_key:
                 raw_tui = template_values[key]
                 break
-        if raw_tui is None:
-            _logger.warning(f"CSV does not contain 'Template Unique Identifier' column (after stripping). Available keys: {list(template_values.keys())}")
-            template_unique_identifier = ''
-        else:
-            _logger.debug(f"Raw Template Unique Identifier: {raw_tui} (type: {type(raw_tui)})")
-            template_unique_identifier = str(raw_tui).strip()
         
         template_ref = template_values.get('Template Internal Reference', '').strip()
-        _logger.info(f"Template identifier from CSV: '{template_unique_identifier}'")
+        _logger.info(f"Template identifier from CSV: '{raw_tui}'")
         _logger.info(f"Template reference from CSV: '{template_ref}'")
 
         product_tmpl = self._find_existing_template(template_values)
@@ -438,20 +436,22 @@ class ImportVariant(models.TransientModel):
         ProductTemplate = self.env['product.template']
         
         # Try finding by external ID first
+        def remove_bom(s):
+            return s.encode('utf-8').decode('utf-8-sig')
+        
         raw_tui = None
+        target_key = 'Template Unique Identifier'
         for key in template_values:
-            if key.strip() == 'Template Unique Identifier':
+            if remove_bom(key) == target_key:
                 raw_tui = template_values[key]
                 break
-        if raw_tui is None:
-            _logger.warning(f"CSV does not contain 'Template Unique Identifier' column (after stripping). Available keys: {list(template_values.keys())}")
-            template_unique_identifier = ''
-        else:
-            _logger.debug(f"Raw Template Unique Identifier: {raw_tui} (type: {type(raw_tui)})")
-            template_unique_identifier = str(raw_tui).strip()
         
-        if template_unique_identifier:
-            external_id = f"product_tmpl_{template_unique_identifier.replace(' ', '_').lower()}"
+        template_ref = template_values.get('Template Internal Reference', '').strip()
+        _logger.info(f"Template identifier from CSV: '{raw_tui}'")
+        _logger.info(f"Template reference from CSV: '{template_ref}'")
+
+        if raw_tui:
+            external_id = f"product_tmpl_{raw_tui.replace(' ', '_').lower()}"
             _logger.info(f"Searching template by external ID: {external_id}")
             template = self.env.ref(f'__import__.{external_id}', raise_if_not_found=False)
             if template:
@@ -459,7 +459,6 @@ class ImportVariant(models.TransientModel):
                 return template
         
         # Try finding by internal reference
-        template_ref = template_values.get('Template Internal Reference', '').strip()
         if template_ref:
             _logger.info(f"Searching template by default_code: {template_ref}")
             template = ProductTemplate.search([('default_code', '=', template_ref)], limit=1)
