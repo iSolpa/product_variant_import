@@ -550,18 +550,27 @@ class ImportVariant(models.TransientModel):
                         'combination_indices': ','.join(map(str, sorted(value_combination)))
                     })
                 else:
-                    # If no valid attribute combination is built, look for the default variant
-                    variant = self.env['product.product'].search([
-                        ('product_tmpl_id', '=', product_tmpl.id),
-                        '|', ('combination_indices', '=', ''),
-                        ('combination_indices', '=', False)
-                    ], limit=1)
-                    
-                    if not variant:
-                        # Atomic creation of default variant
-                        with self.env.cr.savepoint():
-                            variant = product_tmpl._create_product_variant(False)
-                            _logger.info(f'Created new default variant for {product_tmpl.name}')
+                    # For default variant (no attribute values), reuse the default variant if available
+                    if product_tmpl.product_variant_id:
+                        variant = product_tmpl.product_variant_id
+                        _logger.info(f'Reusing existing default variant for {product_tmpl.name}')
+                    else:
+                        # Fallback: search for existing default variant using proper NULL handling
+                        variant = self.env['product.product'].search([
+                            ('product_tmpl_id', '=', product_tmpl.id),
+                            '|', ('combination_indices', '=', ''),
+                                 ('combination_indices', '=', False)
+                        ], limit=1)
+
+                        if not variant:
+                            # Use Odoo's native method with proper error handling
+                            try:
+                                with self.env.cr.savepoint():
+                                    variant = product_tmpl._create_product_variant(False)
+                                    _logger.info(f'Successfully created default variant for {product_tmpl.name}')
+                            except Exception as create_error:
+                                _logger.error(f'Failed to create default variant: {create_error}')
+                                return False
 
             except Exception as e:
                 _logger.error(f"Error creating variant: {e}")
