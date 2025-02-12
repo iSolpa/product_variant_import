@@ -272,84 +272,77 @@ class ImportVariant(models.TransientModel):
         return not bool(existing_product), existing_product
 
     def _process_csv_rows(self, rows, column_map):
-        """Process CSV rows."""
-        # Validate required columns
-        required_columns = ['Name', 'Category']
-        missing_columns = [col for col in required_columns if col not in column_map]
-        if missing_columns:
-            raise UserError(_("Missing required columns: %s") % ", ".join(missing_columns))
+        """Process CSV rows and create/update products."""
+        _logger.info(f"Total rows to process: {len(rows)}")
         
-        # Collect rows into batches based on product templates
-        batch_size = 50  # Adjust as needed
-        total_rows = len(rows)
-        _logger.info(f"Total rows to process: {total_rows}")
-        # Collect all rows first
-        product_data_list = []
-        for row_num, row in enumerate(rows, start=2):
-            valid, error_msg = fp.validate_row_data(row, len(column_map), row_num, required_columns)
-            if not valid:
-                _logger.warning(error_msg)
-                continue
-            
-            values = {col: fp.process_cell_value(row[idx]) for col, idx in column_map.items() if idx < len(row)}
-            product_data_list.append(values)
-        
-        # Group product data by product templates
-        products_map = {}  # group_key -> [values]
-        for values in product_data_list:
-            group_key = values.get('Unique Identifier') or values.get('Name')
-            if not group_key:
-                _logger.warning(f"Skipping row: No Unique Identifier or Name found")
-                continue
-            if group_key not in products_map:
-                products_map[group_key] = []
-            products_map[group_key].append(values)
-        
-        # Now process products in batches
-        product_keys = list(products_map.keys())
-        total_products = len(product_keys)
-        _logger.info(f"Total products to process: {total_products}")
-        for batch_start in range(0, total_products, batch_size):
-            batch_end = min(batch_start + batch_size, total_products)
-            batch_product_keys = product_keys[batch_start:batch_end]
-            batch_number = batch_start // batch_size + 1
-            _logger.info(f"Processing batch {batch_number}: Products {batch_start+1} to {batch_end}")
-            for group_key in batch_product_keys:
-                product_values_list = products_map[group_key]
-                self._process_product_template(group_key, product_values_list)
-            _logger.info(f"Completed processing batch {batch_number}")
-        _logger.info("Finished processing all batches")
-
-    def _process_product_template(self, group_key, product_values_list):
-        """Process a single product template and its variants."""
-        template_values = product_values_list[0].copy()
-        template_ref = template_values.get('Template Internal Reference') or template_values.get('Internal Reference')
-        _logger.info(f"Using template reference: {template_ref}")
-        
-        # Find or create template
-        _logger.info(f"=== Finding template for reference: {template_ref} ===")
-        product_tmpl = self._find_existing_template(template_values)
-        
-        if product_tmpl:
-            # Update existing template
-            product_tmpl = self._update_product_template(product_tmpl, template_values)
-        else:
-            # Create new template
-            _logger.info(f"Creating new template with reference: {template_ref}")
-            product_tmpl = self._create_product_template(template_values)
-            
-        if not product_tmpl:
-            _logger.error(f"Failed to create/update template for reference: {template_ref}")
-            return
-            
-        # Process variants
-        processed_count = 0
-        for variant_values in product_values_list:
-            variant = self._create_or_update_variant(product_tmpl, variant_values)
-            if variant:
-                processed_count += 1
+        # Group products by template
+        template_groups = {}
+        for row in rows:
+            product_values = self._prepare_product_values(row, column_map)
+            template_ref = product_values.get('Template Internal Reference') or product_values.get('Internal Reference')
+            if template_ref:
+                if template_ref not in template_groups:
+                    template_groups[template_ref] = []
+                template_groups[template_ref].append(product_values)
                 
-        _logger.info(f"=== Completed template processing. Processed {processed_count} variants ===")
+        _logger.info(f"Total products to process: {len(template_groups)}")
+        
+        # Find or create all templates first
+        self.template_cache = {}  # Cache for template records
+        ProductTemplate = self.env['product.template']
+        
+        # Get all existing templates in one query
+        template_refs = list(template_groups.keys())
+        existing_templates = ProductTemplate.search([('default_code', 'in', template_refs)])
+        for template in existing_templates:
+            self.template_cache[template.default_code] = template.id
+            
+        # Create missing templates
+        templates_to_create = []
+        for template_ref, product_values_list in template_groups.items():
+            if template_ref not in self.template_cache:
+                templates_to_create.append((template_ref, product_values_list[0]))
+                
+        for template_ref, template_values in templates_to_create:
+            template = self._create_product_template(template_values)
+            if template:
+                self.template_cache[template_ref] = template.id
+                
+        self.env.cr.commit()  # Commit all template creations
+        
+        # Now process variants using cached templates
+        batch_size = 50
+        total_batches = (len(template_groups) + batch_size - 1) // batch_size
+        
+        batch_num = 1
+        for i in range(0, len(template_refs), batch_size):
+            batch_refs = template_refs[i:i + batch_size]
+            _logger.info(f"Processing batch {batch_num}: Products {i + 1} to {min(i + batch_size, len(template_refs))}")
+            
+            for template_ref in batch_refs:
+                product_values_list = template_groups[template_ref]
+                template_id = self.template_cache.get(template_ref)
+                if not template_id:
+                    _logger.error(f"Template not found in cache for reference: {template_ref}")
+                    continue
+                    
+                template = ProductTemplate.browse(template_id)
+                if not template.exists():
+                    _logger.error(f"Template {template_id} does not exist for reference: {template_ref}")
+                    continue
+                    
+                _logger.info(f"Using template reference: {template_ref}")
+                self._process_variants_for_template(template, product_values_list)
+                
+            batch_num += 1
+            self.env.cr.commit()  # Commit after each batch
+
+    def _process_variants_for_template(self, template, product_values_list):
+        """Process variants for a given template."""
+        for variant_values in product_values_list:
+            variant = self._create_or_update_variant(template, variant_values)
+            if variant:
+                _logger.info(f"Processed variant {variant.id} for template {template.id}")
 
     def _find_existing_template(self, template_values):
         """Find existing template by various identifiers."""
