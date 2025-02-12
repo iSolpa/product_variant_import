@@ -769,7 +769,7 @@ class ImportVariant(models.TransientModel):
 
     def _create_variant_external_ids(self, variant, values):
         """Create external IDs for variant"""
-        variant_ref = values.get('Internal Reference', '').strip()
+        variant_ref = values.get('Unique Identifier', '').strip() or values.get('Internal Reference', '').strip()
         if variant_ref:
             external_id = f"product_product_{variant_ref.replace(' ', '_').lower()}"
             self._create_external_id(variant, external_id)
