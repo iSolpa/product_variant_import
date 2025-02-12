@@ -338,9 +338,9 @@ class ImportVariant(models.TransientModel):
         # Step 2: Search for existing template
         template_values = product_values_list[0].copy()
         # Get template identifier
-        template_identifier =  template_values.get('Template Unique Identifier') or template_values.get('Template Internal Reference') or template_values.get('Internal Reference')
-        _logger.info(f"Template identifier from CSV: {template_identifier}")
-        template_ref = template_values.get('Template Internal Reference') or template_values.get('Internal Reference')
+        template_unique_identifier = template_values.get('Template Unique Identifier', '').strip()
+        template_ref = template_values.get('Template Internal Reference', '').strip()
+        _logger.info(f"Template identifier from CSV: {template_unique_identifier}")
         _logger.info(f"Template reference from CSV: {template_ref}")
         product_tmpl = self._find_existing_template(template_values)
         
@@ -426,8 +426,7 @@ class ImportVariant(models.TransientModel):
         ProductTemplate = self.env['product.template']
         
         # Try finding by external ID first
-        template_unique_identifier = template_values.get('Template Unique Identifier') or template_values.get('Template Internal Reference') or template_values.get('Internal Reference')
-        template_ref = template_values.get('Template Internal Reference') or template_values.get('Internal Reference')
+        template_unique_identifier = template_values.get('Template Unique Identifier', '').strip()
         if template_unique_identifier:
             external_id = f"product_tmpl_{template_unique_identifier.replace(' ', '_').lower()}"
             _logger.info(f"Searching template by external ID: {external_id}")
@@ -437,6 +436,7 @@ class ImportVariant(models.TransientModel):
                 return template
         
         # Try finding by internal reference
+        template_ref = template_values.get('Template Internal Reference', '').strip()
         if template_ref:
             _logger.info(f"Searching template by default_code: {template_ref}")
             template = ProductTemplate.search([('default_code', '=', template_ref)], limit=1)
@@ -763,14 +763,14 @@ class ImportVariant(models.TransientModel):
 
     def _create_template_external_ids(self, product_tmpl, template_values):
         """Create external IDs for template"""
-        template_ref = template_values.get('Template Internal Reference') or template_values.get('Internal Reference')
+        template_ref = template_values.get('Template Internal Reference', '').strip()
         if template_ref:
             external_id = f"product_tmpl_{template_ref.replace(' ', '_').lower()}"
             self._create_external_id(product_tmpl, external_id)
 
     def _create_variant_external_ids(self, variant, values):
         """Create external IDs for variant"""
-        variant_ref = values.get('Unique Identifier', '').strip() or values.get('Internal Reference', '').strip()
+        variant_ref = values.get('Unique Identifier', '').strip()
         if variant_ref:
             external_id = f"product_product_{variant_ref.replace(' ', '_').lower()}"
             self._create_external_id(variant, external_id)
@@ -1024,7 +1024,7 @@ class ImportVariant(models.TransientModel):
         ProductTemplate = self.env['product.template']
         
         # Try to find existing template
-        template_ref = values.get('Template Internal Reference') or values.get('Internal Reference')
+        template_ref = values.get('Template Internal Reference', '').strip()
         if template_ref:
             template = ProductTemplate.search([('default_code', '=', template_ref)], limit=1)
             if template:
