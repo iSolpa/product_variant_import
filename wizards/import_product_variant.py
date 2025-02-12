@@ -32,6 +32,7 @@ import itertools
 import psycopg2
 from odoo import api
 from odoo.modules.registry import Registry
+import re
 
 _logger = logging.getLogger(__name__)
 
@@ -327,21 +328,28 @@ class ImportVariant(models.TransientModel):
         _logger.info(f"=== Processing template group: {group_key} ===")
         _logger.info(f"Number of variants to process: {len(product_values_list)}")
         
-        # Step 1: Extract template values
+        # Step 1: Extract template values and find the correct template reference
         template_values = product_values_list[0].copy()
-        template_ref = template_values.get('Template Internal Reference') or template_values.get('Internal Reference')
         
+        # First try to find a row with Template Internal Reference
+        template_ref = None
+        for values in product_values_list:
+            if values.get('Template Internal Reference'):
+                template_ref = values['Template Internal Reference']
+                template_values = values.copy()  # Use this row as template values
+                break
+                
+        # If no Template Internal Reference found, use the first row's Internal Reference
+        if not template_ref:
+            template_ref = template_values.get('Internal Reference')
+            
         if not template_ref:
             _logger.error("No template reference found in values")
             return False
             
+        _logger.info(f"Using template reference: {template_ref}")
+            
         # Step 2: Find or create template with proper locking
-        self.env.cr.execute("""
-            SELECT id FROM product_template 
-            WHERE default_code = %s
-            FOR UPDATE NOWAIT
-        """, (template_ref,))
-        
         product_tmpl = self._find_existing_template(template_values)
         if not product_tmpl:
             _logger.info(f"Creating new template with reference: {template_ref}")
@@ -359,8 +367,8 @@ class ImportVariant(models.TransientModel):
         for values in product_values_list:
             # Verify variant belongs to this template
             variant_template_ref = values.get('Template Internal Reference') or values.get('Internal Reference')
-            if variant_template_ref != template_ref:
-                _logger.error(f"Variant template reference mismatch. Expected: {template_ref}, Found: {variant_template_ref}")
+            if variant_template_ref and template_ref not in variant_template_ref and variant_template_ref not in template_ref:
+                _logger.error(f"Variant template reference mismatch. Template Ref: {template_ref}, Variant Ref: {variant_template_ref}")
                 continue
                 
             variant = self._create_or_update_variant(product_tmpl, values)
@@ -726,17 +734,52 @@ class ImportVariant(models.TransientModel):
             self._create_external_id(variant, external_id)
 
     def _create_external_id(self, record, external_id):
-        """Create external ID for a record"""
-        if not self.env['ir.model.data'].search([
+        """Create external ID for a record, handling duplicates gracefully"""
+        if not record or not external_id:
+            return False
+            
+        IrModelData = self.env['ir.model.data']
+        
+        # Clean the external_id to be XML-ID compatible
+        clean_external_id = re.sub(r'[^a-zA-Z0-9_]', '_', external_id.lower())
+        
+        # Check if external ID already exists
+        existing = IrModelData.search([
             ('model', '=', record._name),
-            ('res_id', '=', record.id)
-        ]):
-            self.env['ir.model.data'].create({
-                'name': external_id,
+            ('res_id', '=', record.id),
+        ], limit=1)
+        
+        if existing:
+            # Update existing record if needed
+            if existing.name != clean_external_id:
+                try:
+                    existing.write({'name': clean_external_id})
+                except Exception as e:
+                    _logger.warning(f"Could not update external ID: {e}")
+            return existing
+            
+        # Try to create new external ID
+        try:
+            return IrModelData.create({
                 'model': record._name,
                 'res_id': record.id,
-                'module': '__import__'
+                'module': '__import__',
+                'name': clean_external_id,
             })
+        except Exception as e:
+            _logger.warning(f"Could not create external ID: {e}")
+            # If creation fails, try with a unique suffix
+            try:
+                unique_name = f"{clean_external_id}_{record.id}"
+                return IrModelData.create({
+                    'model': record._name,
+                    'res_id': record.id,
+                    'module': '__import__',
+                    'name': unique_name,
+                })
+            except Exception as e:
+                _logger.error(f"Failed to create external ID with unique suffix: {e}")
+                return False
 
     def _prepare_template_values(self, template_values):
         """Prepare values for creating a new product template"""
