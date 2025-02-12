@@ -77,6 +77,8 @@ class ImportVariant(models.TransientModel):
             batch_rows = rows[batch_start:batch_end]
             batch_number = batch_start // batch_size + 1
             _logger.info(f"Processing batch {batch_number}: Rows {batch_start+1} to {batch_end}")
+        
+            # Process rows in batch
             self._process_batch_rows(batch_rows)
             _logger.info(f"Completed processing batch {batch_number}")
 
@@ -552,46 +554,69 @@ class ImportVariant(models.TransientModel):
                 else:
                     # For default variant (no attribute values), first check product_variant_id
                     _logger.info(f'Checking default variant for template {product_tmpl.name} (ID: {product_tmpl.id})')
+                    
+                    # First try to find existing variant through product_variant_id
+                    variant = False
                     if product_tmpl.product_variant_id:
-                        _logger.info(f'Found product_variant_id: {product_tmpl.product_variant_id.id}, combination_indices: {product_tmpl.product_variant_id.combination_indices}')
                         variant = product_tmpl.product_variant_id
-                    else:
-                        # Search for any existing default variant
-                        _logger.info(f'No product_variant_id found, searching for default variant')
+                        _logger.info(f'Found product_variant_id: {variant.id}')
+                    
+                    if not variant:
+                        # Search for existing variants, ordered by id to ensure consistent selection
                         existing_variants = self.env['product.product'].search([
                             ('product_tmpl_id', '=', product_tmpl.id),
-                            '|', ('combination_indices', '=', ''),
-                                 ('combination_indices', '=', False)
-                        ])
-                        _logger.info(f'Found {len(existing_variants)} existing variants with empty combination_indices')
-                        for v in existing_variants:
-                            _logger.info(f'Variant ID: {v.id}, combination_indices: {v.combination_indices}')
+                            '|',
+                            ('combination_indices', '=', ''),
+                            ('combination_indices', '=', False)
+                        ], order='id')
                         
-                        variant = existing_variants[0] if existing_variants else False
-                        
-                        if not variant:
-                            _logger.info(f'No existing default variant found, creating new one')
+                        if existing_variants:
+                            variant = existing_variants[0]
+                            _logger.info(f'Found existing variant: {variant.id}')
+                        else:
                             try:
                                 # Lock the template to prevent concurrent creation
-                                self.env.cr.execute("""SELECT id FROM product_template WHERE id = %s FOR UPDATE NOWAIT""", (product_tmpl.id,))
+                                self.env.cr.execute("""
+                                    SELECT id 
+                                    FROM product_template 
+                                    WHERE id = %s 
+                                    FOR UPDATE NOWAIT
+                                """, (product_tmpl.id,))
                                 
-                                # Double-check after lock
+                                # Recheck after lock
                                 existing_variants = self.env['product.product'].search([
                                     ('product_tmpl_id', '=', product_tmpl.id),
-                                    '|', ('combination_indices', '=', ''),
-                                         ('combination_indices', '=', False)
-                                ])
+                                    '|',
+                                    ('combination_indices', '=', ''),
+                                    ('combination_indices', '=', False)
+                                ], order='id')
                                 
                                 if existing_variants:
-                                    _logger.info(f'Found existing variant after lock: {existing_variants[0].id}')
                                     variant = existing_variants[0]
+                                    _logger.info(f'Found variant after lock: {variant.id}')
                                 else:
+                                    # Create new variant with explicit combination_indices
                                     with self.env.cr.savepoint():
-                                        variant = product_tmpl._create_product_variant(False)
-                                        _logger.info(f'Created new default variant: {variant.id}, combination_indices: {variant.combination_indices}')
-                            except Exception as create_error:
-                                _logger.error(f'Failed to create default variant: {str(create_error)}')
+                                        variant_vals = {
+                                            'product_tmpl_id': product_tmpl.id,
+                                            'combination_indices': '',  # Explicitly set empty string
+                                        }
+                                        variant = self.env['product.product'].create(variant_vals)
+                                        # Ensure combination_indices is set correctly
+                                        variant.flush_recordset(['combination_indices'])
+                                        _logger.info(f'Created new variant: {variant.id}')
+                            except Exception as e:
+                                _logger.error(f'Error creating variant: {str(e)}')
                                 return False
+                    
+                    # If we found or created a variant, ensure it has the correct combination_indices
+                    if variant:
+                        try:
+                            if not variant.combination_indices:
+                                variant.write({'combination_indices': ''})
+                                variant.flush_recordset(['combination_indices'])
+                        except Exception as e:
+                            _logger.error(f'Error updating combination_indices: {str(e)}')
             except Exception as e:
                 _logger.error(f"Error creating variant: {e}")
                 return False
