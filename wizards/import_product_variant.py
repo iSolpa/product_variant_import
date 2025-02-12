@@ -337,6 +337,22 @@ class ImportVariant(models.TransientModel):
             batch_num += 1
             self.env.cr.commit()  # Commit after each batch
 
+    def _prepare_product_values(self, row, column_map):
+        """Prepare product values from CSV row."""
+        values = {}
+        for col, idx in column_map.items():
+            if idx < len(row):
+                value = row[idx].strip() if isinstance(row[idx], str) else row[idx]
+                values[col] = value
+                
+        # Add image URL if configured
+        if values.get('Template Internal Reference') or values.get('Internal Reference'):
+            ref = values.get('Template Internal Reference') or values.get('Internal Reference')
+            if self.image_url_template:
+                values['Image'] = self.image_url_template.format(reference=ref)
+                
+        return values
+
     def _process_variants_for_template(self, template, product_values_list):
         """Process variants for a given template."""
         for variant_values in product_values_list:
