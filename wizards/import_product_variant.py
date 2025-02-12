@@ -382,31 +382,37 @@ class ImportVariant(models.TransientModel):
             
         _logger.info(f"=== Finding template for reference: {template_ref} ===")
         
-        # Lock the template search to prevent concurrent template creation
-        self.env.cr.execute("""
-            SELECT id FROM product_template 
-            WHERE default_code = %s
-            FOR UPDATE NOWAIT
-        """, (template_ref,))
-        result = self.env.cr.fetchone()
+        # First try to find by default_code (internal reference)
+        template = ProductTemplate.search([
+            ('default_code', '=', template_ref)
+        ], limit=1)
         
-        if result:
-            template = ProductTemplate.browse(result[0])
+        if template:
             _logger.info(f"Found template by default_code. ID: {template.id}, Name: {template.name}")
             return template
-        
-        # If no template found, search by barcode as fallback
+            
+        # Then try by barcode
         barcode = template_values.get('Barcode', '').strip()
         if barcode:
             _logger.info(f"Searching template by barcode: {barcode}")
-            template = ProductTemplate.search([('barcode', '=', barcode)], limit=1)
+            template = ProductTemplate.search([
+                ('barcode', '=', barcode)
+            ], limit=1)
             if template:
                 _logger.info(f"Found template by barcode. ID: {template.id}, Name: {template.name}")
-                # Update template reference for consistency
-                template.write({'default_code': template_ref})
                 return template
-        
-        _logger.warning(f"No template found for reference: {template_ref}")
+                
+        # Try by name as a last resort
+        name = template_values.get('Name', '').strip()
+        if name:
+            _logger.info(f"Searching template by name: {name}")
+            template = ProductTemplate.search([
+                ('name', '=', name)
+            ], limit=1)
+            if template:
+                _logger.info(f"Found template by name. ID: {template.id}, Name: {template.name}")
+                return template
+                
         return False
 
     def _create_product_template(self, template_values):
@@ -434,51 +440,46 @@ class ImportVariant(models.TransientModel):
 
     def _find_variant_by_combination(self, product_tmpl, values):
         """Find variant by its attribute combination"""
-        if not (values.get('Variant Attributes') and values.get('Attribute Values')):
-            return False
+        _logger.info(f"Finding variant by combination for template {product_tmpl.name}")
         
-        attribute_names = [name.strip() for name in values['Variant Attributes'].split(',')]
-        attribute_values = [value.strip() for value in values['Attribute Values'].split(';')]
-        
-        if len(attribute_names) != len(attribute_values):
-            _logger.warning(f"Mismatch in attribute counts for {product_tmpl.name}")
-            return False
-
-        # Lock the product template to prevent concurrent variant creation
-        self.env.cr.execute("""
-            SELECT id FROM product_template 
-            WHERE id = %s 
-            FOR UPDATE NOWAIT
-        """, (product_tmpl.id,))
-        
-        # Get all product variants with a fresh query
+        # Get all possible variants
         variants = self.env['product.product'].search([
             ('product_tmpl_id', '=', product_tmpl.id)
         ])
         
-        # Create a set of attribute value combinations for faster lookup
-        variant_combinations = {}
-        for variant in variants:
-            key_parts = []
-            for attr_name in attribute_names:
-                attr_value = variant.product_template_attribute_value_ids.filtered(
-                    lambda x: x.attribute_id.name == attr_name
-                ).product_attribute_value_id.name
-                if attr_value:
-                    key_parts.append((attr_name, attr_value))
-            if key_parts:
-                variant_combinations[tuple(sorted(key_parts))] = variant
-
-        # Create key for the current combination
-        current_combination = tuple(sorted(zip(attribute_names, attribute_values)))
-        
-        # Look for exact match
-        matching_variant = variant_combinations.get(current_combination)
-        if matching_variant:
-            _logger.info(f"Found matching variant for combination: {values['Attribute Values']}")
-            return matching_variant
+        if not variants:
+            _logger.info("No variants found for template")
+            return False
             
-        _logger.info(f"No matching variant found for combination: {values['Attribute Values']}")
+        # Extract attribute values from the import data
+        import_attr_values = []
+        for attr in product_tmpl.attribute_line_ids:
+            attr_name = attr.attribute_id.name
+            attr_value = values.get(attr_name)
+            if not attr_value:
+                _logger.warning(f"Missing value for attribute {attr_name}")
+                continue
+            import_attr_values.append(attr_value.strip())
+            
+        if not import_attr_values:
+            _logger.warning("No attribute values found in import data")
+            return False
+            
+        # Sort both lists for consistent comparison
+        import_attr_values = sorted(import_attr_values)
+        
+        # Find matching variant
+        for variant in variants:
+            variant_attr_values = []
+            for value in variant.product_template_attribute_value_ids:
+                variant_attr_values.append(value.product_attribute_value_id.name)
+            variant_attr_values = sorted(variant_attr_values)
+            
+            if import_attr_values == variant_attr_values:
+                _logger.info(f"Found matching variant with combination: {', '.join(variant_attr_values)}")
+                return variant
+                
+        _logger.info(f"No matching variant found for combination: {', '.join(import_attr_values)}")
         return False
 
     def _create_or_update_variant(self, product_tmpl, values):
@@ -497,7 +498,7 @@ class ImportVariant(models.TransientModel):
         variant = self._find_variant_by_combination(product_tmpl, values)
         
         if not variant and values.get('Internal Reference'):
-            variant = self._find_existing_variant_by_default_code(product_tmpl, values)
+            variant = self._find_variant_by_default_code(product_tmpl, values)
         
         if not variant and values.get('Barcode'):
             variant = self.env['product.product'].search([
@@ -1073,11 +1074,3 @@ class ImportVariant(models.TransientModel):
                     )
         
         return True
-
-    def _find_existing_variant_by_default_code(self, product_tmpl, values):
-        default_code = values.get('default_code')
-        # Search in existing variants of the product template for a matching default_code
-        for variant in product_tmpl.product_variant_ids:
-            if variant.default_code == default_code:
-                return variant
-        return False
