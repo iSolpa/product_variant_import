@@ -55,11 +55,6 @@ class ImportVariant(models.TransientModel):
                             help="Method for importing/Exporting")
     file = fields.Binary(string="File", required=True,
                         help="The file to upload")
-    image_url_template = fields.Char(
-        'Image URL Template', 
-        default='https://int.agrouppanama.com/abiassets/{reference}.jpg',
-        help='Template for generating image URLs. Use {reference} as a placeholder for the product reference.'
-    )
 
     def action_import_product_variant(self):
         """This is used to import/export the product """
@@ -277,93 +272,110 @@ class ImportVariant(models.TransientModel):
         return not bool(existing_product), existing_product
 
     def _process_csv_rows(self, rows, column_map):
-        """Process CSV rows and create/update products."""
-        _logger.info(f"Total rows to process: {len(rows)}")
+        """Process data rows from the CSV file."""
+        _logger.info("Starting to process CSV rows")
         
-        # Group products by template
-        template_groups = {}
+        # Validate required columns
+        required_columns = ['Name', 'Category']
+        missing_columns = [col for col in required_columns if col not in column_map]
+        if missing_columns:
+            raise UserError(_("Missing required columns: %s") % ", ".join(missing_columns))
+        
+        # Pre-process templates to avoid duplicates
+        template_references = set()
         for row in rows:
-            product_values = self._prepare_product_values(row, column_map)
-            template_ref = product_values.get('Template Internal Reference') or product_values.get('Internal Reference')
+            template_ref = row.get('Template Internal Reference') or row.get('Internal Reference')
             if template_ref:
-                if template_ref not in template_groups:
-                    template_groups[template_ref] = []
-                template_groups[template_ref].append(product_values)
-                
-        _logger.info(f"Total products to process: {len(template_groups)}")
+                template_references.add(template_ref)
         
-        # Find or create all templates first
-        self.template_cache = {}  # Cache for template records
+        _logger.info(f"Total unique template references: {len(template_references)}")
+        
+        # Find existing templates
+        existing_templates = {}
         ProductTemplate = self.env['product.template']
-        
-        # Get all existing templates in one query
-        template_refs = list(template_groups.keys())
-        existing_templates = ProductTemplate.search([('default_code', 'in', template_refs)])
-        for template in existing_templates:
-            self.template_cache[template.default_code] = template.id
-            
-        # Create missing templates
-        templates_to_create = []
-        for template_ref, product_values_list in template_groups.items():
-            if template_ref not in self.template_cache:
-                templates_to_create.append((template_ref, product_values_list[0]))
-                
-        for template_ref, template_values in templates_to_create:
-            template = self._create_product_template(template_values)
+        for template_ref in template_references:
+            template = ProductTemplate.search([('default_code', '=', template_ref)], limit=1)
             if template:
-                self.template_cache[template_ref] = template.id
-                
-        self.env.cr.commit()  # Commit all template creations
+                _logger.info(f"Found existing template for reference: {template_ref}. ID: {template.id}, Name: {template.name}")
+                existing_templates[template_ref] = template
         
-        # Now process variants using cached templates
+        _logger.info(f"Found {len(existing_templates)} existing templates")
+        
+        # Create missing templates
+        new_templates = {}
+        for template_ref in template_references:
+            if template_ref not in existing_templates:
+                # Find the product_values_list for this template_ref
+                product_values_list = []
+                for row in rows:
+                    if (row.get('Template Internal Reference') or row.get('Internal Reference')) == template_ref:
+                        product_values_list.append(row)
+                        
+                if product_values_list:
+                    template_values = product_values_list[0].copy()
+                    template = self._create_product_template(template_values)
+                    if template:
+                        new_templates[template_ref] = template
+                        _logger.info(f"Created new template for reference: {template_ref}. ID: {template.id}, Name: {template.name}")
+                    else:
+                        _logger.error(f"Failed to create template for reference: {template_ref}")
+                else:
+                    _logger.warning(f"No product values found for template reference: {template_ref}")
+                        
+        _logger.info(f"Created {len(new_templates)} new templates")
+        
+        # Combine existing and new templates
+        all_templates = existing_templates.copy()
+        all_templates.update(new_templates)
+        
+        _logger.info(f"Total templates (existing + new): {len(all_templates)}")
+        
+        # Process product data in batches
+        # Collect rows into batches based on product templates
+        products = {}
+        for row in rows:
+            template_ref = row.get('Template Internal Reference') or row.get('Internal Reference')
+            if not template_ref:
+                template_ref = 'No Template' # Group products without template
+            if template_ref not in products:
+                products[template_ref] = []
+            products[template_ref].append(row)
+        
+        total_products = len(products)
+        _logger.info(f"Total products to process: {total_products}")
+        
         batch_size = 50
-        total_batches = (len(template_groups) + batch_size - 1) // batch_size
-        
-        batch_num = 1
-        for i in range(0, len(template_refs), batch_size):
-            batch_refs = template_refs[i:i + batch_size]
-            _logger.info(f"Processing batch {batch_num}: Products {i + 1} to {min(i + batch_size, len(template_refs))}")
+        product_count = 0
+        for i, group_key in enumerate(products):
+            product_values_list = products[group_key]
+            start = i * batch_size + 1
+            end = min((i + 1) * batch_size, total_products)
+            _logger.info(f"Processing batch {i + 1}: Products {start} to {end}")
             
-            for template_ref in batch_refs:
-                product_values_list = template_groups[template_ref]
-                template_id = self.template_cache.get(template_ref)
-                if not template_id:
-                    _logger.error(f"Template not found in cache for reference: {template_ref}")
+            # Retrieve the template from the dictionary
+            if group_key != 'No Template':
+                product_tmpl = all_templates.get(group_key)
+                if not product_tmpl:
+                    _logger.error(f"No template found for reference: {group_key}")
                     continue
-                    
-                template = ProductTemplate.browse(template_id)
-                if not template.exists():
-                    _logger.error(f"Template {template_id} does not exist for reference: {template_ref}")
-                    continue
-                    
-                _logger.info(f"Using template reference: {template_ref}")
-                self._process_variants_for_template(template, product_values_list)
-                
-            batch_num += 1
-            self.env.cr.commit()  # Commit after each batch
-
-    def _prepare_product_values(self, row, column_map):
-        """Prepare product values from CSV row."""
-        values = {}
-        for col, idx in column_map.items():
-            if idx < len(row):
-                value = row[idx].strip() if isinstance(row[idx], str) else row[idx]
-                values[col] = value
-                
-        # Add image URL if configured
-        if values.get('Template Internal Reference') or values.get('Internal Reference'):
-            ref = values.get('Template Internal Reference') or values.get('Internal Reference')
-            if self.image_url_template:
-                values['Image'] = self.image_url_template.format(reference=ref)
-                
-        return values
-
-    def _process_variants_for_template(self, template, product_values_list):
-        """Process variants for a given template."""
-        for variant_values in product_values_list:
-            variant = self._create_or_update_variant(template, variant_values)
-            if variant:
-                _logger.info(f"Processed variant {variant.id} for template {template.id}")
+            else:
+                 product_tmpl = False
+                 
+            # Process variants for the template
+            processed_count = 0
+            for variant_values in product_values_list:
+                if product_tmpl:
+                    variant = self._create_or_update_variant(product_tmpl, variant_values)
+                    if variant:
+                        processed_count += 1
+                else:
+                    # Create template on the fly if no template is defined
+                    template = self._create_product_template(variant_values)
+                    if template:
+                        variant = self._create_or_update_variant(template, variant_values)
+                        if variant:
+                            processed_count += 1
+            _logger.info(f"=== Completed template processing. Processed {processed_count} variants ===")
 
     def _find_existing_template(self, template_values):
         """Find existing template by various identifiers."""
@@ -576,11 +588,11 @@ class ImportVariant(models.TransientModel):
             attribute_values = [value.strip() for value in values['Attribute Values'].split(';')]
             
             if len(attribute_names) != len(attribute_values):
-                _logger.warning(f"Mismatch in attribute counts for {product_tmpl.name}")
+                _logger.warning(f"Mismatch in attribute counts for {variant.product_tmpl_id.name}")
                 return False
 
             # Get all product template attribute lines
-            template_attribute_lines = product_tmpl.attribute_line_ids
+            template_attribute_lines = variant.product_tmpl_id.attribute_line_ids
 
             # Collect attribute value IDs in the order they appear in the template
             attribute_value_ids = []
@@ -590,7 +602,7 @@ class ImportVariant(models.TransientModel):
                     lambda l: l.attribute_id.name == attr_name
                 )
                 if not attr_line:
-                    _logger.warning(f"Attribute {attr_name} not found in template {product_tmpl.name}")
+                    _logger.warning(f"Attribute {attr_name} not found in template {variant.product_tmpl_id.name}")
                     continue
 
                 # Find the attribute value
@@ -603,7 +615,7 @@ class ImportVariant(models.TransientModel):
 
                 # Get the product template attribute value
                 ptav = self.env['product.template.attribute.value'].search([
-                    ('product_tmpl_id', '=', product_tmpl.id),
+                    ('product_tmpl_id', '=', variant.product_tmpl_id.id),
                     ('product_attribute_value_id', '=', attr_value_id.id)
                 ], limit=1)
                 
