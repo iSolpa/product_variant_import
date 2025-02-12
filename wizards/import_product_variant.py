@@ -77,6 +77,7 @@ class ImportVariant(models.TransientModel):
             batch_rows = rows[batch_start:batch_end]
             batch_number = batch_start // batch_size + 1
             _logger.info(f"Processing batch {batch_number}: Rows {batch_start+1} to {batch_end}")
+        # Process each batch
             self._process_batch_rows(batch_rows)
             _logger.info(f"Completed processing batch {batch_number}")
 
@@ -492,11 +493,18 @@ class ImportVariant(models.TransientModel):
         product_tmpl.invalidate_recordset()  # Invalidate cache in Odoo 17
         product_tmpl = self.env['product.template'].browse(product_tmpl.id)
         
+        _logger.info(f"product_tmpl.id: {product_tmpl.id}")
+        _logger.info(f"values: {values}")
+        
         # First try to find the variant by combination
         variant = self._find_variant_by_combination(product_tmpl, values)
         
+        _logger.info(f"variant after _find_variant_by_combination: {variant}")
+        
         if not variant and values.get('Internal Reference'):
             variant = self._find_variant_by_default_code(product_tmpl, values)
+        
+        _logger.info(f"variant after _find_variant_by_default_code: {variant}")
         
         if not variant and values.get('Barcode'):
             variant = self.env['product.product'].search([
@@ -504,6 +512,8 @@ class ImportVariant(models.TransientModel):
                 ('product_tmpl_id', '=', product_tmpl.id)
             ], limit=1)
 
+        _logger.info(f"variant after barcode search: {variant}")
+        
         # If no variant found and we have attribute values, try to create one
         if not variant and values.get('Variant Attributes') and values.get('Attribute Values'):
             try:
@@ -567,6 +577,8 @@ class ImportVariant(models.TransientModel):
             _logger.warning(f"Could not find or create variant for {product_tmpl.name}")
             return False
 
+        _logger.info(f"variant before update: {variant}")
+        
         # Update variant values
         update_vals = {}
         
@@ -600,6 +612,8 @@ class ImportVariant(models.TransientModel):
                 _logger.info(f"Setting cost price to {cost_value} for variant with combination {values.get('Variant Attributes')}")
             except (ValueError, TypeError):
                 _logger.warning(f"Invalid cost value: {values['Cost']}")
+        
+        _logger.info(f"update_vals before attribute handling: {update_vals}")
         
         # Handle attribute values
         if values.get('Variant Attributes') and values.get('Attribute Values'):
@@ -645,6 +659,8 @@ class ImportVariant(models.TransientModel):
                 update_vals['product_template_attribute_value_ids'] = [(6, 0, attribute_value_ids)]
                 _logger.info(f"Setting attribute values for variant: {attribute_value_ids}")
 
+        _logger.info(f"update_vals after attribute handling: {update_vals}")
+        
         if update_vals:
             try:
                 variant.write(update_vals)
@@ -652,6 +668,8 @@ class ImportVariant(models.TransientModel):
             except Exception as e:
                 _logger.error(f"Failed to update variant values: {str(e)}")
                 
+        _logger.info(f"variant after update: {variant}")
+        
         # Ensure external IDs are created
         self._create_template_external_ids(variant.product_tmpl_id, values)
         self._create_variant_external_ids(variant, values)
