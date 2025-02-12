@@ -371,39 +371,43 @@ class ImportVariant(models.TransientModel):
         return processed_variants
 
     def _find_existing_template(self, template_values):
-        """Search for existing template using multiple criteria"""
-        # Resolve the unique reference value, prioritizing "Template Internal Reference"
+        """Search for existing template by external ID, internal reference, or barcode"""
+        ProductTemplate = self.env['product.template']
+        
+        # Try finding by external ID first
         template_ref = template_values.get('Template Internal Reference') or template_values.get('Internal Reference')
-        if template_ref:
-            template_ref_norm = template_ref.strip().lower()
-            existing = self.env['product.template'].search([
-                ('default_code', '=', template_ref)
-            ], limit=1)
-            if existing:
-                return existing
-
-        # Priority 2: Check by external ID
-        if template_values.get('External ID'):
-            existing = self.env.ref(template_values['External ID'], raise_if_not_found=False)
-            if existing:
-                return existing
-
-        # Priority 3: Check by barcode, with validation if a reference is present.
-        if template_values.get('Barcode'):
-            barcode = template_values.get('Barcode').strip()
-            existing = self.env['product.template'].search([
-                ('barcode', '=', barcode)
-            ], limit=1)
-            if existing and template_ref:
-                # Normalize values for comparison:
-                existing_code_norm = existing.default_code.strip().lower()
-                # Accept if the existing default_code exactly matches or ends with the expected reference.
-                if existing_code_norm != template_ref_norm and not existing_code_norm.endswith(template_ref_norm):
-                    _logger.error("Template reference mismatch. Expected: %s, Found: %s", template_ref, existing.default_code)
-                    raise UserError(_("Template reference mismatch detected. Please reconcile identifiers."))
-                return existing
-
-        return self.env['product.template']
+        if not template_ref:
+            _logger.error("No template reference provided")
+            return False
+            
+        _logger.info(f"=== Finding template for reference: {template_ref} ===")
+        
+        # Lock the template search to prevent concurrent template creation
+        self.env.cr.execute("""
+            SELECT id FROM product_template 
+            WHERE default_code = %s
+            FOR UPDATE NOWAIT
+        """, (template_ref,))
+        result = self.env.cr.fetchone()
+        
+        if result:
+            template = ProductTemplate.browse(result[0])
+            _logger.info(f"Found template by default_code. ID: {template.id}, Name: {template.name}")
+            return template
+        
+        # If no template found, search by barcode as fallback
+        barcode = template_values.get('Barcode', '').strip()
+        if barcode:
+            _logger.info(f"Searching template by barcode: {barcode}")
+            template = ProductTemplate.search([('barcode', '=', barcode)], limit=1)
+            if template:
+                _logger.info(f"Found template by barcode. ID: {template.id}, Name: {template.name}")
+                # Update template reference for consistency
+                template.write({'default_code': template_ref})
+                return template
+        
+        _logger.warning(f"No template found for reference: {template_ref}")
+        return False
 
     def _create_product_template(self, template_values):
         """Create a new product template"""
@@ -493,7 +497,7 @@ class ImportVariant(models.TransientModel):
         variant = self._find_variant_by_combination(product_tmpl, values)
         
         if not variant and values.get('Internal Reference'):
-            variant = self._find_variant_by_default_code(product_tmpl, values)
+            variant = self._find_existing_variant_by_default_code(product_tmpl, values)
         
         if not variant and values.get('Barcode'):
             variant = self.env['product.product'].search([
@@ -1069,3 +1073,11 @@ class ImportVariant(models.TransientModel):
                     )
         
         return True
+
+    def _find_existing_variant_by_default_code(self, product_tmpl, values):
+        default_code = values.get('default_code')
+        # Search in existing variants of the product template for a matching default_code
+        for variant in product_tmpl.product_variant_ids:
+            if variant.default_code == default_code:
+                return variant
+        return False
