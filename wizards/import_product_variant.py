@@ -284,8 +284,9 @@ class ImportVariant(models.TransientModel):
         # Pre-process templates to avoid duplicates
         template_references = set()
         for row in rows:
-            template_ref = row.get('Template Internal Reference') or row.get('Internal Reference')
-            if template_ref:
+            template_ref_index = column_map.get('Template Internal Reference') or column_map.get('Internal Reference')
+            if template_ref_index is not None and template_ref_index < len(row):
+                template_ref = row[template_ref_index]
                 template_references.add(template_ref)
         
         _logger.info(f"Total unique template references: {len(template_references)}")
@@ -308,11 +309,17 @@ class ImportVariant(models.TransientModel):
                 # Find the product_values_list for this template_ref
                 product_values_list = []
                 for row in rows:
-                    if (row.get('Template Internal Reference') or row.get('Internal Reference')) == template_ref:
-                        product_values_list.append(row)
-                        
+                    template_ref_index = column_map.get('Template Internal Reference') or column_map.get('Internal Reference')
+                    if template_ref_index is not None and template_ref_index < len(row):
+                        if row[template_ref_index] == template_ref:
+                            product_values_list.append(row)
+        
                 if product_values_list:
-                    template_values = product_values_list[0].copy()
+                    # Create a dictionary from the list for _create_product_template
+                    template_values = {}
+                    for col, index in column_map.items():
+                        if index < len(product_values_list[0]):
+                            template_values[col] = product_values_list[0][index]
                     template = self._create_product_template(template_values)
                     if template:
                         new_templates[template_ref] = template
@@ -321,7 +328,7 @@ class ImportVariant(models.TransientModel):
                         _logger.error(f"Failed to create template for reference: {template_ref}")
                 else:
                     _logger.warning(f"No product values found for template reference: {template_ref}")
-                        
+        
         _logger.info(f"Created {len(new_templates)} new templates")
         
         # Combine existing and new templates
@@ -334,14 +341,17 @@ class ImportVariant(models.TransientModel):
         # Collect rows into batches based on product templates
         products = {}
         for row in rows:
-            template_ref = row.get('Template Internal Reference') or row.get('Internal Reference')
-            if not template_ref:
+            template_ref_index = column_map.get('Template Internal Reference') or column_map.get('Internal Reference')
+            if template_ref_index is not None and template_ref_index < len(row):
+                template_ref = row[template_ref_index]
+            else:
                 template_ref = 'No Template' # Group products without template
             if template_ref not in products:
                 products[template_ref] = []
             products[template_ref].append(row)
         
         total_products = len(products)
+        
         _logger.info(f"Total products to process: {total_products}")
         
         batch_size = 50
@@ -351,7 +361,7 @@ class ImportVariant(models.TransientModel):
             start = i * batch_size + 1
             end = min((i + 1) * batch_size, total_products)
             _logger.info(f"Processing batch {i + 1}: Products {start} to {end}")
-            
+        
             # Retrieve the template from the dictionary
             if group_key != 'No Template':
                 product_tmpl = all_templates.get(group_key)
@@ -359,20 +369,29 @@ class ImportVariant(models.TransientModel):
                     _logger.error(f"No template found for reference: {group_key}")
                     continue
             else:
-                 product_tmpl = False
-                 
+                product_tmpl = False
+        
             # Process variants for the template
             processed_count = 0
-            for variant_values in product_values_list:
+            for row in product_values_list:
+                # Create a dictionary from the list for _create_or_update_variant
+                variant_values = {}
+                for col, index in column_map.items():
+                    if index < len(row):
+                        variant_values[col] = row[index]
                 if product_tmpl:
                     variant = self._create_or_update_variant(product_tmpl, variant_values)
                     if variant:
                         processed_count += 1
                 else:
                     # Create template on the fly if no template is defined
-                    template = self._create_product_template(variant_values)
+                    template_values = {}
+                    for col, index in column_map.items():
+                        if index < len(row):
+                            template_values[col] = row[index]
+                    template = self._create_product_template(template_values)
                     if template:
-                        variant = self._create_or_update_variant(template, variant_values)
+                        variant = self._create_or_update_variant(template, template_values)
                         if variant:
                             processed_count += 1
             _logger.info(f"=== Completed template processing. Processed {processed_count} variants ===")
