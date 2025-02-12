@@ -444,7 +444,7 @@ class ImportVariant(models.TransientModel):
         template = ProductTemplate.create(vals)
         
         # Prepare and set attribute lines
-        attr_lines = self._prepare_attribute_lines(template, template_values)
+        attr_lines = self._prepare_attribute_lines(template_values, template)
         if attr_lines:
             template.write({'attribute_line_ids': attr_lines})
             
@@ -834,13 +834,19 @@ class ImportVariant(models.TransientModel):
             
         return vals
 
-    def _prepare_attribute_lines(self, template, values):
-        """Prepare attribute lines for product template from import values."""
-        if not values.get('Variant Attributes') or not values.get('Attribute Values'):
+    def _prepare_attribute_lines(self, template_values, template):
+        """Prepare attribute lines for product template from import values.
+        Args:
+            template_values (dict): The values from the import file
+            template (product.template): The template record to add attributes to
+        Returns:
+            list: List of attribute line commands to write to the template
+        """
+        if not template_values.get('Variant Attributes') or not template_values.get('Attribute Values'):
             return []
             
-        attributes = values['Variant Attributes'].split(',')
-        values_list = values['Attribute Values'].split(';')
+        attributes = template_values['Variant Attributes'].split(',')
+        values_list = template_values['Attribute Values'].split(';')
         
         if len(attributes) != len(values_list):
             _logger.warning(f"Mismatch in attribute count ({len(attributes)}) and values count ({len(values_list)})")
@@ -904,7 +910,7 @@ class ImportVariant(models.TransientModel):
         template = ProductTemplate.create(vals)
         
         # Prepare and set attribute lines
-        attr_lines = self._prepare_attribute_lines(template, template_values)
+        attr_lines = self._prepare_attribute_lines(template_values, template)
         if attr_lines:
             template.write({'attribute_line_ids': attr_lines})
             
