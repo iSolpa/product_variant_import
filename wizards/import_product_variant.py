@@ -55,6 +55,11 @@ class ImportVariant(models.TransientModel):
                             help="Method for importing/Exporting")
     file = fields.Binary(string="File", required=True,
                         help="The file to upload")
+    image_url_template = fields.Char(
+        'Image URL Template', 
+        default='https://int.agrouppanama.com/abiassets/{reference}.jpg',
+        help='Template for generating image URLs. Use {reference} as a placeholder for the product reference.'
+    )
 
     def action_import_product_variant(self):
         """This is used to import/export the product """
