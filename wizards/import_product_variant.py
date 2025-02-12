@@ -324,102 +324,51 @@ class ImportVariant(models.TransientModel):
         5. Store database IDs for later use
         6. Create external IDs for template and variants
         """
-        _logger.info(f"Processing template with barcode: {group_key}")
-        first_row = product_values_list[0]
-        _logger.info(f"For template [{first_row.get('Template Unique Identifier')}] {first_row.get('Name')}")
+        _logger.info(f"=== Processing template group: {group_key} ===")
+        _logger.info(f"Number of variants to process: {len(product_values_list)}")
         
-        # Step 1: Check if we should skip based on method
-        if self.method == 'create':
-            existing_template = self._find_existing_template(product_values_list[0])
-            if existing_template:
-                _logger.info(f"Skipping existing template in create mode: {group_key}")
-                return
-        
-        # Step 2: Search for existing template
+        # Step 1: Extract template values
         template_values = product_values_list[0].copy()
-        # Get template identifier
-        template_identifier = template_values.get('Template Internal Reference') or template_values.get('Internal Reference')
-        _logger.info(f"Template identifier from CSV: {template_identifier}")
         template_ref = template_values.get('Template Internal Reference') or template_values.get('Internal Reference')
-        _logger.info(f"Template reference from CSV: {template_ref}")
+        
+        if not template_ref:
+            _logger.error("No template reference found in values")
+            return False
+            
+        # Step 2: Find or create template with proper locking
+        self.env.cr.execute("""
+            SELECT id FROM product_template 
+            WHERE default_code = %s
+            FOR UPDATE NOWAIT
+        """, (template_ref,))
+        
         product_tmpl = self._find_existing_template(template_values)
-        
-        # Step 3: Create template if it doesn't exist
         if not product_tmpl:
-            if self.method == 'update':
-                _logger.info(f"Template not found in update mode: {group_key}")
-                return
+            _logger.info(f"Creating new template with reference: {template_ref}")
             product_tmpl = self._create_product_template(template_values)
+            if not product_tmpl:
+                return False
         
-        # Check if this is a product without variants
-        has_variants = any(
-            values.get('Variant Attributes') and values.get('Attribute Values')
-            for values in product_values_list
-        )
+        # Verify template reference matches
+        if product_tmpl.default_code != template_ref:
+            _logger.error(f"Template reference mismatch. Expected: {template_ref}, Found: {product_tmpl.default_code}")
+            return False
         
-        if not has_variants:
-            # Handle single product without variants
-            self._update_product_without_variants(product_tmpl, template_values)
-            return product_tmpl
+        # Step 3: Process variants with additional verification
+        processed_variants = []
+        for values in product_values_list:
+            # Verify variant belongs to this template
+            variant_template_ref = values.get('Template Internal Reference') or values.get('Internal Reference')
+            if variant_template_ref != template_ref:
+                _logger.error(f"Variant template reference mismatch. Expected: {template_ref}, Found: {variant_template_ref}")
+                continue
+                
+            variant = self._create_or_update_variant(product_tmpl, values)
+            if variant:
+                processed_variants.append(variant)
         
-        # Step 4 & 5: Process variants and store their IDs
-        processed_variants = self._process_variants(product_tmpl, product_values_list)
-        
-        # Step 6: Create external IDs for template
-        self._create_template_external_ids(product_tmpl, template_values)
-        
-        return product_tmpl
-
-    def _update_product_without_variants(self, product_tmpl, values):
-        """Handle a product that doesn't have variants"""
-        _logger.info(f"Processing template without variants: {product_tmpl.name}")
-        
-        # Get the single variant
-        variant = product_tmpl.product_variant_ids[0] if product_tmpl.product_variant_ids else False
-        
-        if not variant:
-            # Create the variant if it doesn't exist
-            variant = self.env['product.product'].create({
-                'product_tmpl_id': product_tmpl.id,
-                'active': True
-            })
-        
-        # Update variant values
-        update_vals = {}
-        
-        # Handle internal reference
-        if values.get('Internal Reference'):
-            if not self.env['product.product'].search_count([
-                ('default_code', '=', values['Internal Reference']),
-                ('id', '!=', variant.id)
-            ]):
-                update_vals['default_code'] = values['Internal Reference']
-        
-        # Handle barcode
-        if values.get('Barcode'):
-            if not self.env['product.product'].search_count([
-                ('barcode', '=', values['Barcode']),
-                ('id', '!=', variant.id)
-            ]):
-                update_vals['barcode'] = values['Barcode']
-        
-        # Handle cost
-        if values.get('Cost'):
-            try:
-                update_vals['standard_price'] = float(values['Cost'])
-            except (ValueError, TypeError):
-                _logger.warning(f"Invalid cost value: {values['Cost']}")
-        
-        if update_vals:
-            try:
-                variant.write(update_vals)
-                _logger.info(f"Updated product values: {update_vals}")
-            except Exception as e:
-                _logger.error(f"Failed to update product values: {str(e)}")
-        
-        # Create external IDs
-        self._create_template_external_ids(product_tmpl, values)
-        self._create_variant_external_ids(variant, values)
+        _logger.info(f"=== Completed template processing. Processed {len(processed_variants)} variants ===")
+        return processed_variants
 
     def _find_existing_template(self, template_values):
         """Search for existing template by external ID, internal reference, or barcode"""
@@ -427,36 +376,37 @@ class ImportVariant(models.TransientModel):
         
         # Try finding by external ID first
         template_ref = template_values.get('Template Internal Reference') or template_values.get('Internal Reference')
-        if template_ref:
-            external_id = f"product_tmpl_{template_ref.replace(' ', '_').lower()}"
-            _logger.info(f"Searching template by external ID: {external_id}")
-            template = self.env.ref(f'__import__.{external_id}', raise_if_not_found=False)
-            if template:
-                _logger.info(f"Found template by external ID. ID: {template.id}, Name: {template.name}")
-                return template
+        if not template_ref:
+            _logger.error("No template reference provided")
+            return False
+            
+        _logger.info(f"=== Finding template for reference: {template_ref} ===")
         
-        # Try finding by internal reference
-        if template_ref:
-            _logger.info(f"Searching template by default_code: {template_ref}")
-            template = ProductTemplate.search([('default_code', '=', template_ref)], limit=1)
-            if template:
-                _logger.info(f"Found template by default_code. ID: {template.id}, Name: {template.name}")
-                return template
-            else:
-                _logger.info(f"No template found with default_code: {template_ref}")
+        # Lock the template search to prevent concurrent template creation
+        self.env.cr.execute("""
+            SELECT id FROM product_template 
+            WHERE default_code = %s
+            FOR UPDATE NOWAIT
+        """, (template_ref,))
+        result = self.env.cr.fetchone()
         
-        # Try finding by barcode
+        if result:
+            template = ProductTemplate.browse(result[0])
+            _logger.info(f"Found template by default_code. ID: {template.id}, Name: {template.name}")
+            return template
+        
+        # If no template found, search by barcode as fallback
         barcode = template_values.get('Barcode', '').strip()
         if barcode:
             _logger.info(f"Searching template by barcode: {barcode}")
             template = ProductTemplate.search([('barcode', '=', barcode)], limit=1)
             if template:
                 _logger.info(f"Found template by barcode. ID: {template.id}, Name: {template.name}")
+                # Update template reference for consistency
+                template.write({'default_code': template_ref})
                 return template
-            else:
-                _logger.info(f"No template found with barcode: {barcode}")
         
-        _logger.warning("No template found by any method")
+        _logger.warning(f"No template found for reference: {template_ref}")
         return False
 
     def _create_product_template(self, template_values):
@@ -547,7 +497,7 @@ class ImportVariant(models.TransientModel):
         variant = self._find_variant_by_combination(product_tmpl, values)
         
         if not variant and values.get('Internal Reference'):
-            variant = self._find_existing_variant_by_default_code(product_tmpl, values)
+            variant = self._find_variant_by_default_code(product_tmpl, values)
         
         if not variant and values.get('Barcode'):
             variant = self.env['product.product'].search([
