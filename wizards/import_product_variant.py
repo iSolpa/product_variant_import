@@ -321,156 +321,69 @@ class ImportVariant(models.TransientModel):
         _logger.info("Finished processing all batches")
 
     def _process_product_template(self, group_key, product_values_list):
-        """Process a single product template and its variants following the defined flow:
-        1. Check if we need to skip records based on method
-        2. Search for template by external ID, internal reference, or barcode
-        3. Create template if it doesn't exist
-        4. Create template variants
-        5. Store database IDs for later use
-        6. Create external IDs for template and variants
-        """
-        _logger.info(f"=== Processing template group: {group_key} ===")
-        _logger.info(f"Number of variants to process: {len(product_values_list)}")
-        
-        # Step 1: Extract template values and find the correct template reference
+        """Process a single product template and its variants."""
         template_values = product_values_list[0].copy()
-        
-        # First try to find a row with Template Internal Reference
-        template_ref = None
-        for values in product_values_list:
-            if values.get('Template Internal Reference'):
-                template_ref = values['Template Internal Reference']
-                template_values = values.copy()  # Use this row as template values
-                break
-                
-        # If no Template Internal Reference found, use the first row's Internal Reference
-        if not template_ref:
-            template_ref = template_values.get('Internal Reference')
-            
-        if not template_ref:
-            _logger.error("No template reference found in values")
-            return False
-            
+        template_ref = template_values.get('Template Internal Reference') or template_values.get('Internal Reference')
         _logger.info(f"Using template reference: {template_ref}")
-            
-        # Step 2: Find or create template with proper locking
+        
+        # Find or create template
+        _logger.info(f"=== Finding template for reference: {template_ref} ===")
         product_tmpl = self._find_existing_template(template_values)
-        if not product_tmpl:
+        
+        if product_tmpl:
+            # Update existing template
+            product_tmpl = self._update_product_template(product_tmpl, template_values)
+        else:
+            # Create new template
             _logger.info(f"Creating new template with reference: {template_ref}")
             product_tmpl = self._create_product_template(template_values)
-            if not product_tmpl:
-                return False
-        
-        # Verify template reference matches
-        if product_tmpl.default_code != template_ref:
-            _logger.error(f"Template reference mismatch. Expected: {template_ref}, Found: {product_tmpl.default_code}")
-            return False
-        
-        # Step 3: Process variants with additional verification
-        processed_variants = []
-        for values in product_values_list:
-            # Verify variant belongs to this template
-            variant_template_ref = values.get('Template Internal Reference') or values.get('Internal Reference')
-            if variant_template_ref and template_ref not in variant_template_ref and variant_template_ref not in template_ref:
-                _logger.error(f"Variant template reference mismatch. Template Ref: {template_ref}, Variant Ref: {variant_template_ref}")
-                continue
-                
-            variant = self._create_or_update_variant(product_tmpl, values)
+            
+        if not product_tmpl:
+            _logger.error(f"Failed to create/update template for reference: {template_ref}")
+            return
+            
+        # Process variants
+        processed_count = 0
+        for variant_values in product_values_list:
+            variant = self._process_variant(product_tmpl, variant_values)
             if variant:
-                processed_variants.append(variant)
-        
-        _logger.info(f"=== Completed template processing. Processed {len(processed_variants)} variants ===")
-        return processed_variants
+                processed_count += 1
+                
+        _logger.info(f"=== Completed template processing. Processed {processed_count} variants ===")
 
     def _find_existing_template(self, template_values):
-        """Search for existing template by external ID, internal reference, or barcode"""
-        ProductTemplate = self.env['product.template']
-        
-        # Try finding by external ID first
+        """Search for existing template by various identifiers."""
         template_ref = template_values.get('Template Internal Reference') or template_values.get('Internal Reference')
         if not template_ref:
-            _logger.error("No template reference provided")
-            return False
+            return None
             
-        _logger.info(f"=== Finding template for reference: {template_ref} ===")
-        
-        # First try to find by default_code (internal reference)
-        template = ProductTemplate.search([
-            ('default_code', '=', template_ref)
-        ], limit=1)
-        
-        if template:
-            _logger.info(f"Found template by default_code. ID: {template.id}, Name: {template.name}")
-            return template
-            
-        # Then try by barcode
-        barcode = template_values.get('Barcode', '').strip()
-        if barcode:
-            _logger.info(f"Searching template by barcode: {barcode}")
-            template = ProductTemplate.search([
-                ('barcode', '=', barcode)
-            ], limit=1)
-            if template:
-                _logger.info(f"Found template by barcode. ID: {template.id}, Name: {template.name}")
-                return template
-                
-        # Try by name as a last resort
-        name = template_values.get('Name', '').strip()
-        if name:
-            _logger.info(f"Searching template by name: {name}")
-            template = ProductTemplate.search([
-                ('name', '=', name)
-            ], limit=1)
-            if template:
-                _logger.info(f"Found template by name. ID: {template.id}, Name: {template.name}")
-                return template
-                
-        return False
-
-    def _create_product_template(self, template_values):
-        """Create a new product template with the given values."""
         ProductTemplate = self.env['product.template']
         
-        # Get category
-        category_id = self._get_category_id(template_values.get('Category'))
-        
-        vals = {
-            'name': template_values['Name'],
-            'default_code': template_values.get('Template Internal Reference') or template_values.get('Internal Reference'),
-            'barcode': template_values.get('Barcode'),
-            'type': 'product',
-            'categ_id': category_id,
-            'sale_ok': template_values.get('Canbe Sold', 'TRUE').upper() == 'TRUE',
-            'purchase_ok': template_values.get('Canbe Purchased', 'TRUE').upper() == 'TRUE',
-            'available_in_pos': template_values.get('Available in POS', 'TRUE').upper() == 'TRUE',
-        }
-        
-        # Process image if provided
-        image_url = template_values.get('Image')  # Changed from 'Image' to 'Image URL'
-        if image_url:
-            _logger.info(f"Processing image from URL: {image_url}")
-            try:
-                response = requests.get(image_url, timeout=10)
-                if response.status_code == 200:
-                    image_data = base64.b64encode(response.content)
-                    vals['image_1920'] = image_data.decode('utf-8')  # Decode bytes to string
-                    _logger.info(f"Successfully processed image from {image_url}")
-                else:
-                    _logger.warning(f"Failed to fetch image from {image_url}: Status code {response.status_code}")
-            except Exception as e:
-                _logger.warning(f"Error processing image {image_url}: {str(e)}")
-        else:
-            _logger.info("No image URL found in template values")
-            _logger.debug(f"Available fields in template_values: {list(template_values.keys())}")
-        
-        template = ProductTemplate.create(vals)
-        
-        # Prepare and set attribute lines
-        attr_lines = self._prepare_attribute_lines(template_values, template)
-        if attr_lines:
-            template.write({'attribute_line_ids': attr_lines})
-            
-        return template
+        # Try finding by barcode first
+        barcode = template_values.get('Barcode')
+        if barcode:
+            _logger.info(f"Searching template by barcode: {barcode}")
+            template = ProductTemplate.search([('barcode', '=', barcode)], limit=1)
+            if template:
+                _logger.info(f"Found template by barcode. ID: {template.id}, Name: {template.name}")
+                # Update default_code if it doesn't match
+                if template.default_code != template_ref:
+                    template.default_code = template_ref
+                return template
+                
+        # Try finding by name
+        name = template_values.get('Name')
+        if name:
+            _logger.info(f"Searching template by name: {name}")
+            template = ProductTemplate.search([('name', '=', name)], limit=1)
+            if template:
+                _logger.info(f"Found template by name. ID: {template.id}, Name: {template.name}")
+                # Update default_code if it doesn't match
+                if template.default_code != template_ref:
+                    template.default_code = template_ref
+                return template
+                
+        return None
 
     def _find_variant_by_combination(self, product_tmpl, values):
         """Find variant by its attribute combination"""
@@ -637,11 +550,6 @@ class ImportVariant(models.TransientModel):
             except (ValueError, TypeError):
                 _logger.warning(f"Invalid cost value: {values['Cost']}")
         
-        # Handle quantity from either column name
-        qty_value = values.get('Qty On Hand', values.get('Quantity', ''))
-        if qty_value.strip() if isinstance(qty_value, str) else qty_value:
-            vals['qty_available'] = float(qty_value or '0.0')
-
         # Handle attribute values
         if values.get('Variant Attributes') and values.get('Attribute Values'):
             attribute_names = [name.strip() for name in values['Variant Attributes'].split(',')]
@@ -733,6 +641,50 @@ class ImportVariant(models.TransientModel):
             except (ValueError, TypeError):
                 _logger.warning(f"Invalid cost value: {values['Cost']}")
         
+        # Handle attribute values
+        if values.get('Variant Attributes') and values.get('Attribute Values'):
+            attribute_names = [name.strip() for name in values['Variant Attributes'].split(',')]
+            attribute_values = [value.strip() for value in values['Attribute Values'].split(';')]
+            
+            if len(attribute_names) != len(attribute_values):
+                _logger.warning(f"Mismatch in attribute counts for {variant.product_tmpl_id.name}")
+                return False
+
+            # Get all product template attribute lines
+            template_attribute_lines = variant.product_tmpl_id.attribute_line_ids
+
+            # Collect attribute value IDs in the order they appear in the template
+            attribute_value_ids = []
+            for attr_name, attr_value in zip(attribute_names, attribute_values):
+                # Find the attribute line for this attribute
+                attr_line = template_attribute_lines.filtered(
+                    lambda l: l.attribute_id.name == attr_name
+                )
+                if not attr_line:
+                    _logger.warning(f"Attribute {attr_name} not found in template {variant.product_tmpl_id.name}")
+                    continue
+
+                # Find the attribute value
+                attr_value_id = attr_line.value_ids.filtered(
+                    lambda v: v.name == attr_value
+                )
+                if not attr_value_id:
+                    _logger.warning(f"Value {attr_value} not found for attribute {attr_name}")
+                    continue
+
+                # Get the product template attribute value
+                ptav = self.env['product.template.attribute.value'].search([
+                    ('product_tmpl_id', '=', variant.product_tmpl_id.id),
+                    ('product_attribute_value_id', '=', attr_value_id.id)
+                ], limit=1)
+                
+                if ptav:
+                    attribute_value_ids.append(ptav.id)
+
+            if attribute_value_ids:
+                update_vals['product_template_attribute_value_ids'] = [(6, 0, attribute_value_ids)]
+                _logger.info(f"Setting attribute values for variant: {attribute_value_ids}")
+
         if update_vals:
             try:
                 variant.write(update_vals)
@@ -1095,3 +1047,75 @@ class ImportVariant(models.TransientModel):
                 }))
                 
         return attr_lines
+
+    def _update_product_template(self, template, template_values):
+        """Update an existing product template with new values."""
+        vals = {
+            'name': template_values['Name'],
+            'default_code': template_values.get('Template Internal Reference') or template_values.get('Internal Reference'),
+            'barcode': template_values.get('Barcode'),
+            'sale_ok': template_values.get('Canbe Sold', 'TRUE').upper() == 'TRUE',
+            'purchase_ok': template_values.get('Canbe Purchased', 'TRUE').upper() == 'TRUE',
+            'available_in_pos': template_values.get('Available in POS', 'TRUE').upper() == 'TRUE',
+        }
+        
+        # Process image if provided
+        image_url = template_values.get('Image')
+        if image_url:
+            _logger.info(f"Processing image from URL: {image_url}")
+            try:
+                response = requests.get(image_url, timeout=10)
+                if response.status_code == 200:
+                    image_data = base64.b64encode(response.content)
+                    vals['image_1920'] = image_data.decode('utf-8')
+                    _logger.info(f"Successfully processed image from {image_url}")
+                else:
+                    _logger.warning(f"Failed to fetch image from {image_url}: Status code {response.status_code}")
+            except Exception as e:
+                _logger.warning(f"Error processing image {image_url}: {str(e)}")
+        else:
+            _logger.info("No image URL found in template values")
+            _logger.debug(f"Available fields in template_values: {list(template_values.keys())}")
+        
+        template.write(vals)
+        
+        # Update attribute lines
+        attr_lines = self._prepare_attribute_lines(template_values, template)
+        if attr_lines:
+            template.write({'attribute_line_ids': attr_lines})
+            
+        return template
+
+    def _find_existing_template(self, template_values):
+        """Find existing template by various identifiers."""
+        template_ref = template_values.get('Template Internal Reference') or template_values.get('Internal Reference')
+        if not template_ref:
+            return None
+            
+        ProductTemplate = self.env['product.template']
+        
+        # Try finding by barcode first
+        barcode = template_values.get('Barcode')
+        if barcode:
+            _logger.info(f"Searching template by barcode: {barcode}")
+            template = ProductTemplate.search([('barcode', '=', barcode)], limit=1)
+            if template:
+                _logger.info(f"Found template by barcode. ID: {template.id}, Name: {template.name}")
+                # Update default_code if it doesn't match
+                if template.default_code != template_ref:
+                    template.default_code = template_ref
+                return template
+                
+        # Try finding by name
+        name = template_values.get('Name')
+        if name:
+            _logger.info(f"Searching template by name: {name}")
+            template = ProductTemplate.search([('name', '=', name)], limit=1)
+            if template:
+                _logger.info(f"Found template by name. ID: {template.id}, Name: {template.name}")
+                # Update default_code if it doesn't match
+                if template.default_code != template_ref:
+                    template.default_code = template_ref
+                return template
+                
+        return None
