@@ -354,14 +354,12 @@ class ImportVariant(models.TransientModel):
             product_tmpl = self.env.ref(f'__import__.{external_id}', raise_if_not_found=False)
             if product_tmpl:
                 _logger.info(f"Found template by external ID. ID: {product_tmpl.id}, Name: {product_tmpl.name}")
-                return product_tmpl
 
         if not product_tmpl and template_ref:
             _logger.info(f"Searching template by default_code: {template_ref}")
             product_tmpl = self.env['product.template'].search([('default_code', '=', template_ref)], limit=1)
             if product_tmpl:
                 _logger.info(f"Found template by default_code. ID: {product_tmpl.id}, Name: {product_tmpl.name}")
-                return product_tmpl
 
         # Step 3: Create template if it doesn't exist
         if not product_tmpl:
@@ -374,8 +372,26 @@ class ImportVariant(models.TransientModel):
                     existing_tmpl = self.env.ref(f'__import__.{external_id}', raise_if_not_found=False)
                     if existing_tmpl:
                         _logger.info(f"Using existing template {existing_tmpl.id} instead of creating new one")
-                        return existing_tmpl
+                        product_tmpl = existing_tmpl
 
+        # Check if this is a product without variants
+        has_variants = any(
+            values.get('Variant Attributes') and values.get('Attribute Values')
+            for values in product_values_list
+        )
+        
+        if not has_variants:
+            # Handle single product without variants
+            self._update_product_without_variants(product_tmpl, template_values)
+            return product_tmpl
+        
+        # Step 4 & 5: Process variants and store their IDs
+        processed_variants = self._process_variants(product_tmpl, product_values_list)
+        
+        # Step 6: Create external IDs for template and variants
+        if template_unique_identifier:
+            self._create_template_external_ids(product_tmpl, template_values)
+        
         return product_tmpl
 
     def _update_product_without_variants(self, product_tmpl, values):
@@ -651,7 +667,6 @@ class ImportVariant(models.TransientModel):
             ], limit=1)
             if not existing_product:
                 update_vals['default_code'] = internal_ref
-                _logger.info(f"Setting internal reference {internal_ref} for variant")
         
         # Handle barcode
         barcode = values.get('Barcode', '').strip()
@@ -662,7 +677,6 @@ class ImportVariant(models.TransientModel):
             ], limit=1)
             if not existing_product:
                 update_vals['barcode'] = barcode
-                _logger.info(f"Setting barcode {barcode} for variant")
         
         # Handle cost
         if values.get('Cost'):
@@ -747,7 +761,6 @@ class ImportVariant(models.TransientModel):
             ], limit=1)
             if not existing_product:
                 update_vals['default_code'] = internal_ref
-                _logger.info(f"Setting internal reference {internal_ref} for variant")
         
         # Handle barcode
         barcode = values.get('Barcode', '').strip()
@@ -758,7 +771,6 @@ class ImportVariant(models.TransientModel):
             ], limit=1)
             if not existing_product:
                 update_vals['barcode'] = barcode
-                _logger.info(f"Setting barcode {barcode} for variant")
         
         # Handle cost
         if values.get('Cost'):
