@@ -20,9 +20,13 @@
 #    If not, see <http://www.gnu.org/licenses/>.
 #
 #############################################################################
+import base64
+import csv
+import io
 import logging
-import os
-import base64, binascii, csv, io, tempfile, requests, xlrd
+import requests
+from datetime import datetime
+import binascii, tempfile, xlrd
 from odoo import fields, models, _
 from odoo.exceptions import UserError
 from odoo.tools import float_compare
@@ -424,7 +428,7 @@ class ImportVariant(models.TransientModel):
         return False
 
     def _create_product_template(self, template_values):
-        """Create a new product template"""
+        """Create a new product template with the given values."""
         ProductTemplate = self.env['product.template']
         
         # Get category
@@ -440,6 +444,19 @@ class ImportVariant(models.TransientModel):
             'purchase_ok': template_values.get('Canbe Purchased', 'TRUE').upper() == 'TRUE',
             'available_in_pos': template_values.get('Available in POS', 'TRUE').upper() == 'TRUE',
         }
+        
+        # Process image if provided
+        if template_values.get('Image'):
+            try:
+                image_url = template_values['Image']
+                response = requests.get(image_url, timeout=10)
+                if response.status_code == 200:
+                    image_data = base64.b64encode(response.content)
+                    vals['image_1920'] = image_data
+                else:
+                    _logger.warning(f"Failed to fetch image from {image_url}: Status code {response.status_code}")
+            except Exception as e:
+                _logger.warning(f"Error processing image {template_values['Image']}: {str(e)}")
         
         template = ProductTemplate.create(vals)
         
