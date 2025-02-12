@@ -550,28 +550,48 @@ class ImportVariant(models.TransientModel):
                         'combination_indices': ','.join(map(str, sorted(value_combination)))
                     })
                 else:
-                    # For default variant (no attribute values), reuse the default variant if available
+                    # For default variant (no attribute values), first check product_variant_id
+                    _logger.info(f'Checking default variant for template {product_tmpl.name} (ID: {product_tmpl.id})')
                     if product_tmpl.product_variant_id:
+                        _logger.info(f'Found product_variant_id: {product_tmpl.product_variant_id.id}, combination_indices: {product_tmpl.product_variant_id.combination_indices}')
                         variant = product_tmpl.product_variant_id
-                        _logger.info(f'Reusing existing default variant for {product_tmpl.name}')
                     else:
-                        # Fallback: search for existing default variant using proper NULL handling
-                        variant = self.env['product.product'].search([
+                        # Search for any existing default variant
+                        _logger.info(f'No product_variant_id found, searching for default variant')
+                        existing_variants = self.env['product.product'].search([
                             ('product_tmpl_id', '=', product_tmpl.id),
                             '|', ('combination_indices', '=', ''),
                                  ('combination_indices', '=', False)
-                        ], limit=1)
-
+                        ])
+                        _logger.info(f'Found {len(existing_variants)} existing variants with empty combination_indices')
+                        for v in existing_variants:
+                            _logger.info(f'Variant ID: {v.id}, combination_indices: {v.combination_indices}')
+                        
+                        variant = existing_variants[0] if existing_variants else False
+                        
                         if not variant:
-                            # Use Odoo's native method with proper error handling
+                            _logger.info(f'No existing default variant found, creating new one')
                             try:
-                                with self.env.cr.savepoint():
-                                    variant = product_tmpl._create_product_variant(False)
-                                    _logger.info(f'Successfully created default variant for {product_tmpl.name}')
+                                # Lock the template to prevent concurrent creation
+                                self.env.cr.execute("""SELECT id FROM product_template WHERE id = %s FOR UPDATE NOWAIT""", (product_tmpl.id,))
+                                
+                                # Double-check after lock
+                                existing_variants = self.env['product.product'].search([
+                                    ('product_tmpl_id', '=', product_tmpl.id),
+                                    '|', ('combination_indices', '=', ''),
+                                         ('combination_indices', '=', False)
+                                ])
+                                
+                                if existing_variants:
+                                    _logger.info(f'Found existing variant after lock: {existing_variants[0].id}')
+                                    variant = existing_variants[0]
+                                else:
+                                    with self.env.cr.savepoint():
+                                        variant = product_tmpl._create_product_variant(False)
+                                        _logger.info(f'Created new default variant: {variant.id}, combination_indices: {variant.combination_indices}')
                             except Exception as create_error:
-                                _logger.error(f'Failed to create default variant: {create_error}')
+                                _logger.error(f'Failed to create default variant: {str(create_error)}')
                                 return False
-
             except Exception as e:
                 _logger.error(f"Error creating variant: {e}")
                 return False
