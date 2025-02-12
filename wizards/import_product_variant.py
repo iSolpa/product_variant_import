@@ -563,7 +563,7 @@ class ImportVariant(models.TransientModel):
                     
                     if not variant:
                         # Search for existing variants, ordered by id to ensure consistent selection
-                        existing_variants = self.env['product.product'].search([
+                        existing_variants = self.env['product.product'].with_context(active_test=False).search([
                             ('product_tmpl_id', '=', product_tmpl.id),
                             '|',
                             ('combination_indices', '=', ''),
@@ -583,38 +583,30 @@ class ImportVariant(models.TransientModel):
                                     FOR UPDATE NOWAIT
                                 """, (product_tmpl.id,))
                                 
-                                # Recheck after lock
-                                existing_variants = self.env['product.product'].search([
-                                    ('product_tmpl_id', '=', product_tmpl.id),
-                                    '|',
-                                    ('combination_indices', '=', ''),
-                                    ('combination_indices', '=', False)
-                                ], order='id')
+                                # Create new variant directly to avoid computed fields
+                                self.env.cr.execute("""
+                                    INSERT INTO product_product 
+                                    (product_tmpl_id, combination_indices, create_uid, create_date, write_uid, write_date)
+                                    VALUES (%s, '', %s, now(), %s, now())
+                                    RETURNING id
+                                """, (product_tmpl.id, self.env.uid, self.env.uid))
                                 
-                                if existing_variants:
-                                    variant = existing_variants[0]
-                                    _logger.info(f'Found variant after lock: {variant.id}')
-                                else:
-                                    # Create new variant with explicit combination_indices
-                                    with self.env.cr.savepoint():
-                                        variant_vals = {
-                                            'product_tmpl_id': product_tmpl.id,
-                                            'combination_indices': '',  # Explicitly set empty string
-                                        }
-                                        variant = self.env['product.product'].create(variant_vals)
-                                        # Ensure combination_indices is set correctly
-                                        variant.flush_recordset(['combination_indices'])
-                                        _logger.info(f'Created new variant: {variant.id}')
+                                new_variant_id = self.env.cr.fetchone()[0]
+                                variant = self.env['product.product'].browse(new_variant_id)
+                                _logger.info(f'Created new variant: {variant.id}')
+                                
                             except Exception as e:
                                 _logger.error(f'Error creating variant: {str(e)}')
                                 return False
                     
                     # If we found or created a variant, ensure it has the correct combination_indices
-                    if variant:
+                    if variant and not variant.combination_indices:
                         try:
-                            if not variant.combination_indices:
-                                variant.write({'combination_indices': ''})
-                                variant.flush_recordset(['combination_indices'])
+                            self.env.cr.execute("""
+                                UPDATE product_product 
+                                SET combination_indices = ''
+                                WHERE id = %s
+                            """, (variant.id,))
                         except Exception as e:
                             _logger.error(f'Error updating combination_indices: {str(e)}')
             except Exception as e:
