@@ -446,17 +446,22 @@ class ImportVariant(models.TransientModel):
         }
         
         # Process image if provided
-        if template_values.get('Image'):
+        image_url = template_values.get('Image')  # Changed from 'Image' to 'Image URL'
+        if image_url:
+            _logger.info(f"Processing image from URL: {image_url}")
             try:
-                image_url = template_values['Image']
                 response = requests.get(image_url, timeout=10)
                 if response.status_code == 200:
                     image_data = base64.b64encode(response.content)
-                    vals['image_1920'] = image_data
+                    vals['image_1920'] = image_data.decode('utf-8')  # Decode bytes to string
+                    _logger.info(f"Successfully processed image from {image_url}")
                 else:
                     _logger.warning(f"Failed to fetch image from {image_url}: Status code {response.status_code}")
             except Exception as e:
-                _logger.warning(f"Error processing image {template_values['Image']}: {str(e)}")
+                _logger.warning(f"Error processing image {image_url}: {str(e)}")
+        else:
+            _logger.info("No image URL found in template values")
+            _logger.debug(f"Available fields in template_values: {list(template_values.keys())}")
         
         template = ProductTemplate.create(vals)
         
