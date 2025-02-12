@@ -317,67 +317,55 @@ class ImportVariant(models.TransientModel):
 
     def _process_product_template(self, group_key, product_values_list):
         """Process a single product template and its variants following the defined flow:
-        1. Check if we need to skip records based on method
-        2. Search for template by external ID, internal reference, or barcode
-        3. Create template if it doesn't exist
-        4. Create template variants
-        5. Store database IDs for later use
-        6. Create external IDs for template and variants
+            1. Check if we need to skip records based on method
+            2. Search for template by external ID, internal reference, or barcode
+            3. Create template if it doesn't exist
+            4. Create template variants
+            5. Store database IDs for later use
+            6. Create external IDs for template and variants
         """
-        _logger.info(f"Processing template with barcode: {group_key}")
-        first_row = product_values_list[0]
-        _logger.info(f"For template [{first_row.get('Template Unique Identifier')}] {first_row.get('Name')}")
-        
-        # Step 1: Check if we should skip based on method
-        if self.method == 'create':
-            existing_template = self._find_existing_template(product_values_list[0])
-            if existing_template:
-                _logger.info(f"Skipping existing template in create mode: {group_key}")
-                return
-        
+        # Step 1: Skip if needed based on method
+        if self.method == 'update_product':
+            _logger.info("Skipping template processing in update_product mode")
+            return
+
         # Step 2: Search for existing template
         template_values = product_values_list[0].copy()
-        # Get template identifier
-        def remove_bom(s):
-            return s.encode('utf-8').decode('utf-8-sig')
-        
-        raw_tui = None
-        target_key = 'Template Unique Identifier'
-        for key in template_values:
-            if remove_bom(key) == target_key:
-                raw_tui = template_values[key]
-                break
-        
+        template_unique_identifier = template_values.get('Template Unique Identifier', '').strip()
         template_ref = template_values.get('Template Internal Reference', '').strip()
-        _logger.info(f"Template identifier from CSV: '{raw_tui}'")
+        _logger.info(f"Template identifier from CSV: '{template_unique_identifier}'")
         _logger.info(f"Template reference from CSV: '{template_ref}'")
 
-        product_tmpl = self._find_existing_template(template_values)
-        
+        # Try to find existing template
+        product_tmpl = None
+        if template_unique_identifier:
+            external_id = f"product_tmpl_{template_unique_identifier.replace(' ', '_').lower()}"
+            _logger.info(f"Searching template by external ID: {external_id}")
+            product_tmpl = self.env.ref(f'__import__.{external_id}', raise_if_not_found=False)
+            if product_tmpl:
+                _logger.info(f"Found template by external ID. ID: {product_tmpl.id}, Name: {product_tmpl.name}")
+                return product_tmpl
+
+        if not product_tmpl and template_ref:
+            _logger.info(f"Searching template by default_code: {template_ref}")
+            product_tmpl = self.env['product.template'].search([('default_code', '=', template_ref)], limit=1)
+            if product_tmpl:
+                _logger.info(f"Found template by default_code. ID: {product_tmpl.id}, Name: {product_tmpl.name}")
+                return product_tmpl
+
         # Step 3: Create template if it doesn't exist
         if not product_tmpl:
-            if self.method == 'update':
-                _logger.info(f"Template not found in update mode: {group_key}")
-                return
+            _logger.warning("No template found by any method")
             product_tmpl = self._create_product_template(template_values)
-        
-        # Check if this is a product without variants
-        has_variants = any(
-            values.get('Variant Attributes') and values.get('Attribute Values')
-            for values in product_values_list
-        )
-        
-        if not has_variants:
-            # Handle single product without variants
-            self._update_product_without_variants(product_tmpl, template_values)
-            return product_tmpl
-        
-        # Step 4 & 5: Process variants and store their IDs
-        processed_variants = self._process_variants(product_tmpl, product_values_list)
-        
-        # Step 6: Create external IDs for template
-        self._create_template_external_ids(product_tmpl, template_values)
-        
+            if template_unique_identifier:
+                external_id = f"product_tmpl_{template_unique_identifier.replace(' ', '_').lower()}"
+                if not self._create_external_id(product_tmpl, external_id):
+                    # If external ID exists but points to a different template, use that template instead
+                    existing_tmpl = self.env.ref(f'__import__.{external_id}', raise_if_not_found=False)
+                    if existing_tmpl:
+                        _logger.info(f"Using existing template {existing_tmpl.id} instead of creating new one")
+                        return existing_tmpl
+
         return product_tmpl
 
     def _update_product_without_variants(self, product_tmpl, values):
@@ -798,9 +786,10 @@ class ImportVariant(models.TransientModel):
             self._create_external_id(variant, external_id)
 
     def _create_external_id(self, record, external_id):
-        """Create external ID for a record. If an external ID with the same module and name already exists but points to a different record, update it."""
+        """Create external ID for a record. If an external ID already exists, return False to indicate
+        that we should be using the existing record instead of creating/updating."""
         model_data = self.env['ir.model.data']
-        _logger.info("Attempting to create/update external ID %s for record (id: %s, model: %s)", external_id, record.id, record._name)
+        _logger.info("Checking external ID %s for record (id: %s, model: %s)", external_id, record.id, record._name)
         
         existing = model_data.search([
             ('module', '=', '__import__'),
@@ -808,12 +797,9 @@ class ImportVariant(models.TransientModel):
         ], limit=1)
 
         if existing:
-            if existing.res_id != record.id:
-                _logger.info("Found existing external ID %s with different res_id. Updating from %s to %s", external_id, existing.res_id, record.id)
-                existing.res_id = record.id
-            else:
-                _logger.info("External ID %s already correctly set with res_id %s, skipping update", external_id, record.id)
-            return
+            _logger.info("Found existing external ID %s pointing to record %s. Will use existing record.", 
+                        external_id, existing.res_id)
+            return False
 
         _logger.info("Creating new external ID %s for record id %s", external_id, record.id)
         model_data.create({
@@ -822,7 +808,7 @@ class ImportVariant(models.TransientModel):
             'res_id': record.id,
             'module': '__import__'
         })
-        _logger.info("Successfully created external ID %s", external_id)
+        return True
 
     def _prepare_template_values(self, template_values):
         """Prepare values for creating a new product template"""
