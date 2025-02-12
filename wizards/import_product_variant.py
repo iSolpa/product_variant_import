@@ -345,7 +345,7 @@ class ImportVariant(models.TransientModel):
         # Process variants
         processed_count = 0
         for variant_values in product_values_list:
-            variant = self._process_variant(product_tmpl, variant_values)
+            variant = self._create_or_update_variant(product_tmpl, variant_values)
             if variant:
                 processed_count += 1
                 
@@ -724,7 +724,7 @@ class ImportVariant(models.TransientModel):
         # Check if external ID already exists
         existing = IrModelData.search([
             ('model', '=', record._name),
-            ('res_id', '=', record.id),
+            ('res_id', '=', record.id)
         ], limit=1)
         
         if existing:
