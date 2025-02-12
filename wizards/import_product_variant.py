@@ -796,12 +796,24 @@ class ImportVariant(models.TransientModel):
         self._create_variant_external_ids(variant, values)
         return variant
 
-    def _create_template_external_ids(self, product_tmpl, template_values):
-        """Create external IDs for template"""
-        template_ref = template_values.get('Template Internal Reference', '').strip()
-        if template_ref:
-            external_id = f"product_tmpl_{template_ref.replace(' ', '_').lower()}"
+    def _create_template_external_ids(self, product_tmpl, values):
+        """Create external IDs for template using exclusively the Template Unique Identifier."""
+        def remove_bom(s):
+            return s.encode('utf-8').decode('utf-8-sig')
+        
+        # Look for Template Unique Identifier in the CSV headers
+        template_unique_identifier = None
+        for key in values:
+            if remove_bom(key) == 'Template Unique Identifier':
+                template_unique_identifier = values[key].strip() if values[key] else ''
+                break
+        
+        if template_unique_identifier:
+            external_id = f"product_tmpl_{template_unique_identifier.replace(' ', '_').lower()}"
+            _logger.info(f"Creating external ID for template using unique identifier: {external_id}")
             self._create_external_id(product_tmpl, external_id)
+        else:
+            _logger.info("No Template Unique Identifier found, skipping external ID creation")
 
     def _create_variant_external_ids(self, variant, values):
         """Create external IDs for variant"""
