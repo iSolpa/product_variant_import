@@ -372,8 +372,8 @@ class ImportVariant(models.TransientModel):
 
     def _find_existing_template(self, template_values):
         """Search for existing template using multiple criteria"""
-        # Resolve the unique reference value, allowing for different CSV key names.
-        template_ref = template_values.get('Internal Reference') or template_values.get('Template Internal Reference')
+        # Resolve the unique reference value, prioritizing "Template Internal Reference"
+        template_ref = template_values.get('Template Internal Reference') or template_values.get('Internal Reference')
         if template_ref:
             existing = self.env['product.template'].search([
                 ('default_code', '=', template_ref)
@@ -387,16 +387,18 @@ class ImportVariant(models.TransientModel):
             if existing:
                 return existing
 
-        # Priority 3: Check by barcode, with validation (if a reference value exists)
+        # Priority 3: Check by barcode, with validation if a reference value is present.
         if template_values.get('Barcode'):
             barcode = template_values.get('Barcode').strip()
             existing = self.env['product.template'].search([
                 ('barcode', '=', barcode)
             ], limit=1)
             if existing:
-                if template_ref and existing.default_code != template_ref:
-                    _logger.error("Template reference mismatch. Expected: %s, Found: %s", template_ref, existing.default_code)
-                    raise UserError(_("Template reference mismatch detected. Please reconcile identifiers."))
+                if template_ref:
+                    # Accept if existing.default_code matches template_ref or ends with template_ref
+                    if existing.default_code != template_ref and not existing.default_code.endswith(template_ref):
+                        _logger.error("Template reference mismatch. Expected: %s, Found: %s", template_ref, existing.default_code)
+                        raise UserError(_("Template reference mismatch detected. Please reconcile identifiers."))
                 return existing
 
         return self.env['product.template']
