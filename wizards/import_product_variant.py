@@ -371,43 +371,34 @@ class ImportVariant(models.TransientModel):
         return processed_variants
 
     def _find_existing_template(self, template_values):
-        """Search for existing template by external ID, internal reference, or barcode"""
-        ProductTemplate = self.env['product.template']
+        """Search for existing template using multiple criteria"""
+        # Priority 1: Check by internal reference
+        if template_values.get('Internal Reference'):
+            existing = self.env['product.template'].search([
+                ('default_code', '=', template_values['Internal Reference'])
+            ], limit=1)
+            if existing:
+                return existing
         
-        # Try finding by external ID first
-        template_ref = template_values.get('Template Internal Reference') or template_values.get('Internal Reference')
-        if not template_ref:
-            _logger.error("No template reference provided")
-            return False
-            
-        _logger.info(f"=== Finding template for reference: {template_ref} ===")
+        # Priority 2: Check by external ID
+        if template_values.get('External ID'):
+            existing = self.env.ref(template_values['External ID'], raise_if_not_found=False)
+            if existing:
+                return existing
         
-        # Lock the template search to prevent concurrent template creation
-        self.env.cr.execute("""
-            SELECT id FROM product_template 
-            WHERE default_code = %s
-            FOR UPDATE NOWAIT
-        """, (template_ref,))
-        result = self.env.cr.fetchone()
+        # Priority 3: Check by barcode with reference validation
+        if template_values.get('Barcode'):
+            existing = self.env['product.template'].search([
+                ('barcode', '=', template_values['Barcode'])
+            ], limit=1)
+            if existing:
+                # Validate reference match if exists
+                if template_values.get('Internal Reference') and existing.default_code != template_values['Internal Reference']:
+                    _logger.error(f"Template reference mismatch. Expected: {template_values['Internal Reference']}, Found: {existing.default_code}")
+                    raise UserError(_("Template reference mismatch detected. Please reconcile identifiers."))
+                return existing
         
-        if result:
-            template = ProductTemplate.browse(result[0])
-            _logger.info(f"Found template by default_code. ID: {template.id}, Name: {template.name}")
-            return template
-        
-        # If no template found, search by barcode as fallback
-        barcode = template_values.get('Barcode', '').strip()
-        if barcode:
-            _logger.info(f"Searching template by barcode: {barcode}")
-            template = ProductTemplate.search([('barcode', '=', barcode)], limit=1)
-            if template:
-                _logger.info(f"Found template by barcode. ID: {template.id}, Name: {template.name}")
-                # Update template reference for consistency
-                template.write({'default_code': template_ref})
-                return template
-        
-        _logger.warning(f"No template found for reference: {template_ref}")
-        return False
+        return self.env['product.template']
 
     def _create_product_template(self, template_values):
         """Create a new product template"""
