@@ -324,10 +324,9 @@ class ImportVariant(models.TransientModel):
             5. Store database IDs for later use
             6. Create external IDs for template and variants
         """
-        # Step 1: Skip if needed based on method
+        # Log the current mode but don't skip processing
         if self.method == 'update_product':
-            _logger.info("Skipping template processing in update_product mode")
-            return
+            _logger.info("Running in update_product mode - will process variants for existing templates")
 
         # Step 2: Search for existing template
         template_values = product_values_list[0].copy()
@@ -361,8 +360,8 @@ class ImportVariant(models.TransientModel):
             if product_tmpl:
                 _logger.info(f"Found template by default_code. ID: {product_tmpl.id}, Name: {product_tmpl.name}")
 
-        # Step 3: Create template if it doesn't exist
-        if not product_tmpl:
+        # Step 3: Create template if it doesn't exist and we're not in update mode
+        if not product_tmpl and self.method != 'update_product':
             _logger.warning("No template found by any method")
             product_tmpl = self._create_product_template(template_values)
             if template_unique_identifier:
@@ -374,25 +373,29 @@ class ImportVariant(models.TransientModel):
                         _logger.info(f"Using existing template {existing_tmpl.id} instead of creating new one")
                         product_tmpl = existing_tmpl
 
-        # Check if this is a product without variants
-        has_variants = any(
-            values.get('Variant Attributes') and values.get('Attribute Values')
-            for values in product_values_list
-        )
-        
-        if not has_variants:
-            # Handle single product without variants
-            self._update_product_without_variants(product_tmpl, template_values)
+        # Only proceed with variant processing if we have a template
+        if product_tmpl:
+            # Check if this is a product without variants
+            has_variants = any(
+                values.get('Variant Attributes') and values.get('Attribute Values')
+                for values in product_values_list
+            )
+            
+            if not has_variants:
+                # Handle single product without variants
+                self._update_product_without_variants(product_tmpl, template_values)
+                return product_tmpl
+            
+            # Step 4 & 5: Process variants and store their IDs
+            processed_variants = self._process_variants(product_tmpl, product_values_list)
+            
+            # Step 6: Create external IDs for template and variants
+            if template_unique_identifier and self.method != 'update_product':
+                self._create_template_external_ids(product_tmpl, template_values)
+            
             return product_tmpl
-        
-        # Step 4 & 5: Process variants and store their IDs
-        processed_variants = self._process_variants(product_tmpl, product_values_list)
-        
-        # Step 6: Create external IDs for template and variants
-        if template_unique_identifier:
-            self._create_template_external_ids(product_tmpl, template_values)
-        
-        return product_tmpl
+        else:
+            _logger.warning(f"No template found for processing variants in update mode. Reference: {template_ref}")
 
     def _update_product_without_variants(self, product_tmpl, values):
         """Handle a product that doesn't have variants"""
