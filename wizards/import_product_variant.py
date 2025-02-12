@@ -798,17 +798,31 @@ class ImportVariant(models.TransientModel):
             self._create_external_id(variant, external_id)
 
     def _create_external_id(self, record, external_id):
-        """Create external ID for a record"""
-        if not self.env['ir.model.data'].search([
-            ('model', '=', record._name),
-            ('res_id', '=', record.id)
-        ]):
-            self.env['ir.model.data'].create({
-                'name': external_id,
-                'model': record._name,
-                'res_id': record.id,
-                'module': '__import__'
-            })
+        """Create external ID for a record. If an external ID with the same module and name already exists but points to a different record, update it."""
+        model_data = self.env['ir.model.data']
+        _logger.info("Attempting to create/update external ID %s for record (id: %s, model: %s)", external_id, record.id, record._name)
+        
+        existing = model_data.search([
+            ('module', '=', '__import__'),
+            ('name', '=', external_id)
+        ], limit=1)
+
+        if existing:
+            if existing.res_id != record.id:
+                _logger.info("Found existing external ID %s with different res_id. Updating from %s to %s", external_id, existing.res_id, record.id)
+                existing.res_id = record.id
+            else:
+                _logger.info("External ID %s already correctly set with res_id %s, skipping update", external_id, record.id)
+            return
+
+        _logger.info("Creating new external ID %s for record id %s", external_id, record.id)
+        model_data.create({
+            'name': external_id,
+            'model': record._name,
+            'res_id': record.id,
+            'module': '__import__'
+        })
+        _logger.info("Successfully created external ID %s", external_id)
 
     def _prepare_template_values(self, template_values):
         """Prepare values for creating a new product template"""
