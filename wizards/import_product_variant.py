@@ -352,35 +352,41 @@ class ImportVariant(models.TransientModel):
         _logger.info(f"=== Completed template processing. Processed {processed_count} variants ===")
 
     def _find_existing_template(self, template_values):
-        """Search for existing template by various identifiers."""
+        """Find existing template by various identifiers."""
         template_ref = template_values.get('Template Internal Reference') or template_values.get('Internal Reference')
         if not template_ref:
             return None
             
         ProductTemplate = self.env['product.template']
         
+        # If we have a reference, ONLY search by that reference
+        if template_ref:
+            _logger.info(f"Searching template by reference: {template_ref}")
+            template = ProductTemplate.search([('default_code', '=', template_ref)], limit=1)
+            if template:
+                _logger.info(f"Found template by reference. ID: {template.id}, Name: {template.name}")
+                return template
+            else:
+                _logger.info(f"No template found with reference: {template_ref}")
+                return None
+        
+        # Only fall back to barcode/name matching if no reference was provided
         # Try finding by barcode first
         barcode = template_values.get('Barcode')
         if barcode:
-            _logger.info(f"Searching template by barcode: {barcode}")
+            _logger.info(f"No reference provided. Searching template by barcode: {barcode}")
             template = ProductTemplate.search([('barcode', '=', barcode)], limit=1)
             if template:
                 _logger.info(f"Found template by barcode. ID: {template.id}, Name: {template.name}")
-                # Update default_code if it doesn't match
-                if template.default_code != template_ref:
-                    template.default_code = template_ref
                 return template
                 
-        # Try finding by name
+        # Try finding by name as last resort
         name = template_values.get('Name')
         if name:
-            _logger.info(f"Searching template by name: {name}")
+            _logger.info(f"No reference or barcode match. Searching template by name: {name}")
             template = ProductTemplate.search([('name', '=', name)], limit=1)
             if template:
                 _logger.info(f"Found template by name. ID: {template.id}, Name: {template.name}")
-                # Update default_code if it doesn't match
-                if template.default_code != template_ref:
-                    template.default_code = template_ref
                 return template
                 
         return None
@@ -1094,28 +1100,34 @@ class ImportVariant(models.TransientModel):
             
         ProductTemplate = self.env['product.template']
         
+        # If we have a reference, ONLY search by that reference
+        if template_ref:
+            _logger.info(f"Searching template by reference: {template_ref}")
+            template = ProductTemplate.search([('default_code', '=', template_ref)], limit=1)
+            if template:
+                _logger.info(f"Found template by reference. ID: {template.id}, Name: {template.name}")
+                return template
+            else:
+                _logger.info(f"No template found with reference: {template_ref}")
+                return None
+        
+        # Only fall back to barcode/name matching if no reference was provided
         # Try finding by barcode first
         barcode = template_values.get('Barcode')
         if barcode:
-            _logger.info(f"Searching template by barcode: {barcode}")
+            _logger.info(f"No reference provided. Searching template by barcode: {barcode}")
             template = ProductTemplate.search([('barcode', '=', barcode)], limit=1)
             if template:
                 _logger.info(f"Found template by barcode. ID: {template.id}, Name: {template.name}")
-                # Update default_code if it doesn't match
-                if template.default_code != template_ref:
-                    template.default_code = template_ref
                 return template
                 
-        # Try finding by name
+        # Try finding by name as last resort
         name = template_values.get('Name')
         if name:
-            _logger.info(f"Searching template by name: {name}")
+            _logger.info(f"No reference or barcode match. Searching template by name: {name}")
             template = ProductTemplate.search([('name', '=', name)], limit=1)
             if template:
                 _logger.info(f"Found template by name. ID: {template.id}, Name: {template.name}")
-                # Update default_code if it doesn't match
-                if template.default_code != template_ref:
-                    template.default_code = template_ref
                 return template
                 
         return None
