@@ -47,7 +47,7 @@ class ImportVariant(models.TransientModel):
 
     import_file = fields.Selection(
         [('csv', 'CSV File'), ('excel', 'Excel File')], required=True,
-        string="Import File", help="Import the files")
+        string="Import File", help="Import the file")
     method = fields.Selection([('create', 'Create Product'),
                              ('update', 'Update Product'),
                              ('update_product', 'Update Product Variant')],
@@ -550,11 +550,18 @@ class ImportVariant(models.TransientModel):
                         'combination_indices': ','.join(map(str, sorted(value_combination)))
                     })
                 else:
-                    # If no valid attribute combination is built, look for the default variant where combination_indices is empty, False, or None
+                    # If no valid attribute combination is built, look for the default variant
                     variant = self.env['product.product'].search([
                         ('product_tmpl_id', '=', product_tmpl.id),
-                        ('combination_indices', 'in', ('', False, None))
-                    ], limit=1) or (product_tmpl.product_variant_id if hasattr(product_tmpl, 'product_variant_id') else False)
+                        '|', ('combination_indices', '=', ''),
+                        ('combination_indices', '=', False)
+                    ], limit=1)
+                    
+                    if not variant:
+                        # Atomic creation of default variant
+                        with self.env.cr.savepoint():
+                            variant = product_tmpl._create_product_variant(False)
+                            _logger.info(f'Created new default variant for {product_tmpl.name}')
 
             except Exception as e:
                 _logger.error(f"Error creating variant: {e}")
