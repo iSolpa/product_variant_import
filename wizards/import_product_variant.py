@@ -338,10 +338,18 @@ class ImportVariant(models.TransientModel):
         # Step 2: Search for existing template
         template_values = product_values_list[0].copy()
         # Get template identifier
-        template_unique_identifier = template_values.get('Template Unique Identifier', '').strip()
+        if 'Template Unique Identifier' not in template_values:
+            _logger.warning(f"CSV does not contain 'Template Unique Identifier' column. Available keys: {list(template_values.keys())}")
+            template_unique_identifier = ''
+        else:
+            raw_tui = template_values.get('Template Unique Identifier')
+            _logger.debug(f"Raw Template Unique Identifier: {raw_tui} (type: {type(raw_tui)})")
+            template_unique_identifier = str(raw_tui).strip() if raw_tui else ''
+        
         template_ref = template_values.get('Template Internal Reference', '').strip()
-        _logger.info(f"Template identifier from CSV: {template_unique_identifier}")
-        _logger.info(f"Template reference from CSV: {template_ref}")
+        _logger.info(f"Template identifier from CSV: '{template_unique_identifier}'")
+        _logger.info(f"Template reference from CSV: '{template_ref}'")
+
         product_tmpl = self._find_existing_template(template_values)
         
         # Step 3: Create template if it doesn't exist
@@ -427,6 +435,8 @@ class ImportVariant(models.TransientModel):
         
         # Try finding by external ID first
         template_unique_identifier = template_values.get('Template Unique Identifier', '').strip()
+        if not template_unique_identifier:
+            _logger.warning(f"'Template Unique Identifier' column not found or empty in CSV values. Available keys: {list(template_values.keys())}")
         if template_unique_identifier:
             external_id = f"product_tmpl_{template_unique_identifier.replace(' ', '_').lower()}"
             _logger.info(f"Searching template by external ID: {external_id}")
