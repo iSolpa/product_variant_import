@@ -1050,6 +1050,10 @@ class ImportVariant(models.TransientModel):
         
         return variant
 
+    def _find_existing_variant_by_default_code(self, product_tmpl, values):
+        """Compatibility wrapper to locate variants by internal reference."""
+        return self._find_variant_by_default_code(product_tmpl, values)
+
     def _get_selection_key(self, field_name, value):
         """Get selection key from field selection."""
         field_selection = dict(self.env['product.template']._fields[field_name].selection)
