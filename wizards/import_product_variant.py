@@ -621,7 +621,7 @@ class ImportVariant(models.TransientModel):
                         continue
 
                     attr_value_id = attr_line.value_ids.filtered(
-                        lambda v: v.name == attr_value
+                        lambda v: v.name.strip().lower() == attr_value.strip().lower()
                     )
                     if not attr_value_id:
                         _logger.warning(f"Value {attr_value} not found for attribute {attr_name}")
@@ -638,10 +638,13 @@ class ImportVariant(models.TransientModel):
                 if value_combination:
                     # Ensure we have the latest state before creating variant
                     self.env.cr.commit()  # Commit current transaction
-                    
+
+                    # Convert ids to recordset as _create_product_variant expects a combination recordset
+                    combination = self.env['product.template.attribute.value'].browse(value_combination)
+
                     # Use Odoo's native variant creation mechanism in a new transaction
                     variant = product_tmpl.with_context(create_product_product=True)._create_product_variant(
-                        product_template_attribute_value_ids=value_combination
+                        combination
                     )
                     
                     if variant:
@@ -693,7 +696,7 @@ class ImportVariant(models.TransientModel):
         # Handle quantity from either column name
         qty_value = values.get('Qty On Hand', values.get('Quantity', ''))
         if qty_value.strip() if isinstance(qty_value, str) else qty_value:
-            vals['qty_available'] = float(qty_value or '0.0')
+            update_vals['qty_available'] = float(qty_value or '0.0')
 
         # Handle attribute values
         if values.get('Variant Attributes') and values.get('Attribute Values'):
@@ -720,7 +723,7 @@ class ImportVariant(models.TransientModel):
 
                 # Find the attribute value
                 attr_value_id = attr_line.value_ids.filtered(
-                    lambda v: v.name == attr_value
+                    lambda v: v.name.strip().lower() == attr_value.strip().lower()
                 )
                 if not attr_value_id:
                     _logger.warning(f"Value {attr_value} not found for attribute {attr_name}")
@@ -1017,7 +1020,7 @@ class ImportVariant(models.TransientModel):
 
                 # Find the attribute value
                 attr_value_id = attr_line.value_ids.filtered(
-                    lambda v: v.name == attr_value
+                    lambda v: v.name.strip().lower() == attr_value.strip().lower()
                 )
                 if not attr_value_id:
                     _logger.warning(f"Value {attr_value} not found for attribute {attr_name}")
@@ -1049,6 +1052,10 @@ class ImportVariant(models.TransientModel):
         ], limit=1)
         
         return variant
+
+    def _find_existing_variant_by_default_code(self, product_tmpl, values):
+        """Compatibility wrapper to locate variants by internal reference."""
+        return self._find_variant_by_default_code(product_tmpl, values)
 
     def _get_selection_key(self, field_name, value):
         """Get selection key from field selection."""
