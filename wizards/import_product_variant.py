@@ -638,10 +638,13 @@ class ImportVariant(models.TransientModel):
                 if value_combination:
                     # Ensure we have the latest state before creating variant
                     self.env.cr.commit()  # Commit current transaction
-                    
+
+                    # Convert ids to recordset as _create_product_variant expects a combination recordset
+                    combination = self.env['product.template.attribute.value'].browse(value_combination)
+
                     # Use Odoo's native variant creation mechanism in a new transaction
                     variant = product_tmpl.with_context(create_product_product=True)._create_product_variant(
-                        product_template_attribute_value_ids=value_combination
+                        combination
                     )
                     
                     if variant:
@@ -1049,6 +1052,10 @@ class ImportVariant(models.TransientModel):
         ], limit=1)
         
         return variant
+
+    def _find_existing_variant_by_default_code(self, product_tmpl, values):
+        """Compatibility wrapper to locate variants by internal reference."""
+        return self._find_variant_by_default_code(product_tmpl, values)
 
     def _get_selection_key(self, field_name, value):
         """Get selection key from field selection."""
